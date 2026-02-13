@@ -54,14 +54,11 @@ OKX_CANDLE_LIMIT = 200
 # 监控币种列表
 MONITOR_COINS = [
     'BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'ADA', 'AVAX', 'DOT',
-    'DOGE', 'LTC', 'UNI', 'LINK', 'ATOM', 'XLM', 'ALGO',
-    'FIL', 'TRX', 'ETC', 'XTZ', 'AAVE', 'COMP', 'YFI',
-    'SUSHI', 'SNX', 'CRV', '1INCH', 'NEAR', 'GRT', 'SAND',
-    'MANA', 'ENJ', 'CHZ', 'BAT', 'ZIL', 'ONE', 'IOTA',
+    'DOGE', 'LTC', 'UNI', 'LINK', 'ATOM', 'XLM',
+    'FIL', 'TRX', 'ETC', 'CRV', 'NEAR', 'GRT', 'CHZ',
     'DASH', 'ZEC', 'EGLD', 'CRO', 'KSM', 'DYDX', 'JUP',
     'STORJ', 'SKL', 'HYPE', 'WLD', 'ARB', 'OP', 'LDO',
-    'APT', 'SUI', 'SEI', 'INJ', 'FET', 'THETA', 'AR',
-    'ENS', 'PEPE', 'SHIB', 'APE', 'LIT', 'GALA', 'IMX', 'AXS'
+    'APT', 'SUI', 'SEI', 'INJ', 'PEPE', 'SHIB', 'LIT', 'GALA', 'IMX', 'AXS'
 ]
 
 # ============ 增强的系统配置类（宽松参数版）============
