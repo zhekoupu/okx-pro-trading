@@ -1,0 +1,36 @@
+name: Run Trading Bot
+
+on:
+  schedule:
+    - cron: '0,45 * * * *'   # 每小时的0分和45分运行（≈每45分钟）
+  workflow_dispatch:         # 支持手动触发
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Cache cooldown state
+        uses: actions/cache@v4
+        with:
+          path: cooldown_state.pkl
+          key: cooldown-state
+
+      - name: Run trading bot (once)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python trading_bot.py --once
