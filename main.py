@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v34.0 · 宽松参数适配版（立即生效，产生信号）
+终极智能交易系统 v34.0 · GitHub Actions 适配版
 ================================================================
 ✅ 全策略ATR动态止损止盈
 ✅ ADX市场过滤（阈值35，仅极强趋势过滤）
 ✅ 各策略阈值大幅放宽，适应实盘波动
 ✅ 完整回测引擎与Telegram通知
+✅ 支持环境变量 + --once 参数（专为Actions定时运行优化）
 ================================================================
 """
 
-# ============ 自动安装依赖 ============
+# ============ 自动安装依赖（保留，但Actions里会预装）============
 import subprocess
 import sys
 import os
@@ -43,9 +44,9 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Tuple, Optional
 from collections import defaultdict, deque
 
-# ============ 用户配置区 ============
-TELEGRAM_BOT_TOKEN = "8455563588:AAERqF8wtcQUOojByNPPpbb0oJG-7VMpr9s"
-TELEGRAM_CHAT_ID = "2004655568"
+# ============ 用户配置区（支持环境变量）============
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8455563588:AAERqF8wtcQUOojByNPPpbb0oJG-7VMpr9s")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "2004655568")
 OKX_API_BASE_URL = "https://www.okx.com"
 OKX_CANDLE_INTERVAL = ["15m", "1H"]
 OKX_CANDLE_LIMIT = 200
@@ -2450,6 +2451,9 @@ def main():
     print("🚀 终极智能交易系统 v34.0 宽松参数适配版")
     print("="*70)
 
+    # 判断是否只运行一次（用于 GitHub Actions）
+    run_once = "--once" in sys.argv
+
     if UltimateConfig.BACKTEST_CONFIG['enabled']:
         print("\n🔧 回测模式已启用，将运行回测，不发送Telegram通知")
         fetcher = OKXDataFetcher()
@@ -2464,10 +2468,12 @@ def main():
     )
     if system:
         print("\n✅ 系统初始化完成！")
-        print("\n🚀 立即运行首次增强分析周期...")
-        system.run_single_cycle()
-        print("\n🚀 自动启动连续监控模式...")
-        system.run_continuous()
+        print("\n🚀 立即运行一次增强分析周期...")
+        system.run_single_cycle()   # 只运行一次
+        if not run_once:
+            # 如果没有 --once 参数，才进入连续模式
+            print("\n🚀 自动启动连续监控模式...")
+            system.run_continuous()
 
 if __name__ == "__main__":
     main()
