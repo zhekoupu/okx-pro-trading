@@ -1,1 +1,4 @@
-requests pandas numpy ta-lib
+pandas
+numpy
+requests
+pyTelegramBotAPI
