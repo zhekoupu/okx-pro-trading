@@ -1,36 +1,49 @@
-name: Run Trading Bot
+name: 运行交易系统
 
 on:
   schedule:
-    - cron: '0,45 * * * *'   # 每小时的0分和45分运行（≈每45分钟）
-  workflow_dispatch:         # 支持手动触发
+    # 每小时运行一次（UTC 时间），可根据需要调整 cron 表达式
+    - cron: '0 * * * *'
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
-  run:
+  run-trading-bot:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+      - name: 安装依赖
+        run: |
+          pip install pandas numpy requests pyTelegramBotAPI
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Cache cooldown state
+      # 恢复之前的冷却状态缓存（如果存在）
+      - name: 恢复冷却状态缓存
         uses: actions/cache@v4
+        id: cache-cooldown
         with:
           path: cooldown_state.pkl
-          key: cooldown-state
+          key: cooldown-${{ github.run_id }}
+          restore-keys: |
+            cooldown-
 
-      - name: Run trading bot (once)
+      - name: 运行交易系统
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python trading_bot.py --once
+          GITHUB_ACTIONS: true  # 用于脚本识别环境
+        run: python trading_bot.py
+
+      # 保存冷却状态缓存，供下次运行使用
+      - name: 保存冷却状态缓存
+        if: always()  # 即使运行失败也尝试保存
+        uses: actions/cache@v4
+        with:
+          path: cooldown_state.pkl
+          key: cooldown-${{ github.run_id }}
