@@ -1,32 +1,36 @@
-name: Ultimate Smart Trading Bot v33.6
+name: Run Trading Bot
 
 on:
   schedule:
-    - cron: '*/45 * * * *'   # 每45分钟运行一次
-  workflow_dispatch:        # 允许手动触发
+    - cron: '0,45 * * * *'   # 每小时的0分和45分运行（≈每45分钟）
+  workflow_dispatch:         # 支持手动触发
 
 jobs:
-  trading-bot:
+  run:
     runs-on: ubuntu-latest
-
-    env:
-      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v3
-
-      - name: Setup Python 3.10
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
 
-      - name: Run Ultimate Smart Trading Bot
-        run: |
-          python main.py
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Cache cooldown state
+        uses: actions/cache@v4
+        with:
+          path: cooldown_state.pkl
+          key: cooldown-state
+
+      - name: Run trading bot (once)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python trading_bot.py --once
