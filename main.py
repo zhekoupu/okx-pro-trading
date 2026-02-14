@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v34.0 · 宽松参数适配版（立即生效，产生信号）
+终极智能交易系统 v34.0 · 动态参数增强版（全策略ATR/ADX适配）
 ================================================================
-✅ 全策略ATR动态止损止盈
-✅ ADX市场过滤（阈值35，仅极强趋势过滤）
-✅ 各策略阈值大幅放宽，适应实盘波动
-✅ 完整回测引擎与Telegram通知
+✅ 9种策略全部集成ATR动态止损止盈
+✅ ADX市场状态过滤，避免逆势交易
+✅ 内置回测引擎（最长2星期）
+✅ 完整保留Telegram通知功能
+✅ 适配GitHub Actions自动运行（单次分析后退出）
 ================================================================
 """
 
@@ -43,7 +44,10 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Tuple, Optional
 from collections import defaultdict, deque
 
-# ============ 用户配置区 ============
+# ============ 从环境变量读取敏感信息 ============
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8455563588:AAERqF8wtcQUOojByNPPpbb0oJG-7VMpr9s")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "2004655568")
+IN_GITHUB_ACTIONS = os.getenv('GITHUB_ACTIONS') == 'true'   # 检测是否在GitHub Actions中运行
 
 OKX_API_BASE_URL = "https://www.okx.com"
 OKX_CANDLE_INTERVAL = ["15m", "1H"]
@@ -62,13 +66,9 @@ MONITOR_COINS = [
     'ENS', 'PEPE', 'SHIB', 'APE', 'LIT', 'GALA', 'IMX', 'AXS'
 ]
 
-# Telegram 配置（优先从环境变量读取，若无则使用默认值）
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', "8455563588:AAERqF8wtcQUOojByNPPpbb0oJG-7VMpr9s")
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', "2004655568")
-
-# ============ 增强的系统配置类（宽松参数版）============
+# ============ 增强的系统配置类 ============
 class UltimateConfig:
-    VERSION = "34.0-宽松参数适配版"
+    VERSION = "34.0-全策略ATR/ADX适配版"
     ANALYSIS_INTERVAL = 45
     COINS_TO_MONITOR = len(MONITOR_COINS)
     MAX_SIGNALS = 10
@@ -98,7 +98,7 @@ class UltimateConfig:
         'timeout': 20
     }
 
-    # ----- ATR动态止损参数（不变）-----
+    # ----- ATR动态止损参数 -----
     ATR_CONFIG = {
         'period': 14,
         'stop_loss_multiplier': 1.5,
@@ -107,14 +107,14 @@ class UltimateConfig:
         'trailing_stop': 1.0
     }
 
-    # ----- ADX市场过滤（阈值提高至35，减少误杀）-----
+    # ----- ADX市场状态过滤 -----
     ADX_CONFIG = {
         'period': 14,
-        'trend_threshold': 35,      # 原25，提高至35，仅极强趋势才过滤
+        'trend_threshold': 25,
         'enabled': True
     }
 
-    # ----- 回测配置（保持关闭，如需回测再开启）-----
+    # ----- 回测配置 -----
     BACKTEST_CONFIG = {
         'enabled': False,
         'start_date': (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d'),
@@ -139,110 +139,59 @@ class UltimateConfig:
         }
     }
 
-    # ========== 各策略宽松条件（核心修改）==========
     MARKET_MODES = {
-        # ------------------- 做多策略 -------------------
         'BOUNCE': {
             'name': '反弹模式',
             'enabled': True,
-            'conditions': {
-                'max_rsi': 50,              # 原42 → 50
-                'min_volume_ratio': 0.6,    # 原0.7 → 0.6
-                'min_score': 30,            # 原35 → 30
-                'risk_reward': 2.2
-            }
+            'conditions': {'max_rsi': 42, 'min_volume_ratio': 0.7, 'min_score': 35, 'risk_reward': 2.5}
         },
         'BREAKOUT': {
             'name': '突破模式',
             'enabled': True,
-            'conditions': {
-                'min_rsi': 40,              # 原45 → 40
-                'max_rsi': 75,              # 原68 → 75
-                'min_volume_ratio': 0.9,    # 原1.2 → 0.9
-                'min_score': 25,            # 原30 → 25
-                'risk_reward': 2.2
-            }
+            'conditions': {'min_rsi': 45, 'max_rsi': 68, 'min_volume_ratio': 1.2, 'min_score': 30, 'risk_reward': 2.5}
+        },
+        'BREAKOUT_FAIL_SHORT': {
+            'name': '突破失败做空',
+            'enabled': True,
+            'conditions': {'min_rsi': 65, 'breakout_failure_threshold': 0.98, 'min_score': 35, 'risk_reward': 2.2}
         },
         'TREND': {
             'name': '趋势模式',
             'enabled': True,
-            'conditions': {
-                'min_rsi': 35,              # 原40 → 35
-                'max_rsi': 80,              # 原75 → 80
-                'min_volume_ratio': 0.8,    # 原1.0 → 0.8
-                'min_score': 30,            # 原35 → 30
-                'risk_reward': 2.2
-            }
+            'conditions': {'min_rsi': 40, 'max_rsi': 75, 'min_volume_ratio': 1.0, 'min_score': 35, 'risk_reward': 2.5}
         },
         'CALLBACK': {
             'name': '回调模式',
             'enabled': True,
+            'conditions': {'min_rsi': 55, 'callback_range': {'min': 5, 'max': 15}, 'min_score': 40, 'risk_reward': 2.5}
+        },
+        'BOUNCE_FAIL_SHORT': {
+            'name': '反弹失败做空',
+            'enabled': True,
+            'conditions': {'min_score': 45, 'max_bounce_pct': 2.0, 'lookback_periods': 10, 'fib_threshold': 38.2, 'risk_reward': 2.2}
+        },
+        'TREND_EXHAUSTION': {
+            'name': '趋势衰竭做空',
+            'enabled': True,
+            'conditions': {'min_score': 55, 'trend_periods': 30, 'exhaustion_threshold': 0.6,
+                           'volume_divergence_threshold': 0.7, 'required_confirmation': 3, 'risk_reward': 2.0}
+        },
+        'BOUNCE_FAIL_CONFIRM_K': {
+            'name': '反弹失败·确认K做空',
+            'enabled': True,
             'conditions': {
-                'min_rsi': 50,              # 原55 → 50
-                'callback_range': {'min': 3, 'max': 20},  # 原5-15 → 3-20
-                'min_score': 35,            # 原40 → 35
-                'risk_reward': 2.2
+                'min_score': 50, 'max_bounce_count': 1, 'min_entity_ratio': 0.6,
+                'max_lower_shadow_ratio': 0.2, 'required_confirmation': 2,
+                'volume_requirement': 0.8, 'risk_reward': 2.5
             }
         },
         'CALLBACK_CONFIRM_K': {
             'name': '回调企稳·确认K做多',
             'enabled': True,
             'conditions': {
-                'min_score': 40,            # 原50 → 40
-                'max_callback_count': 1,
-                'min_entity_ratio': 0.5,    # 原0.6 → 0.5
-                'max_upper_shadow_ratio': 0.25,  # 原0.2 → 0.25
-                'required_confirmation': 2,
-                'volume_requirement': 0.7,  # 原0.8 → 0.7
-                'risk_reward': 2.2
-            }
-        },
-
-        # ------------------- 做空策略 -------------------
-        'BREAKOUT_FAIL_SHORT': {
-            'name': '突破失败做空',
-            'enabled': True,
-            'conditions': {
-                'min_rsi': 60,              # 原65 → 60
-                'breakout_failure_threshold': 0.98,
-                'min_score': 30,            # 原35 → 30
-                'risk_reward': 2.0
-            }
-        },
-        'BOUNCE_FAIL_SHORT': {
-            'name': '反弹失败做空',
-            'enabled': True,
-            'conditions': {
-                'min_score': 40,            # 原45 → 40
-                'max_bounce_pct': 3.0,      # 原2.0 → 3.0
-                'lookback_periods': 10,
-                'fib_threshold': 38.2,
-                'risk_reward': 2.0
-            }
-        },
-        'TREND_EXHAUSTION': {
-            'name': '趋势衰竭做空',
-            'enabled': True,
-            'conditions': {
-                'min_score': 50,            # 原55 → 50
-                'trend_periods': 30,
-                'exhaustion_threshold': 0.6,
-                'volume_divergence_threshold': 0.7,
-                'required_confirmation': 2,  # 原3 → 2
-                'risk_reward': 1.8
-            }
-        },
-        'BOUNCE_FAIL_CONFIRM_K': {
-            'name': '反弹失败·确认K做空',
-            'enabled': True,
-            'conditions': {
-                'min_score': 40,            # 原50 → 40
-                'max_bounce_count': 1,
-                'min_entity_ratio': 0.5,    # 原0.6 → 0.5
-                'max_lower_shadow_ratio': 0.25,  # 原0.2 → 0.25
-                'required_confirmation': 2,
-                'volume_requirement': 0.7,  # 原0.8 → 0.7
-                'risk_reward': 2.0
+                'min_score': 50, 'max_callback_count': 1, 'min_entity_ratio': 0.6,
+                'max_upper_shadow_ratio': 0.2, 'required_confirmation': 2,
+                'volume_requirement': 0.8, 'risk_reward': 2.5
             }
         }
     }
@@ -322,7 +271,6 @@ class TechnicalIndicatorsMultiTF:
         signal = macd.ewm(span=9, adjust=False).mean()
         return macd - signal
 
-    # ---------- ATR ----------
     @staticmethod
     def calculate_atr(data: pd.DataFrame, period: int = 14):
         high, low, close = data['high'], data['low'], data['close']
@@ -333,7 +281,6 @@ class TechnicalIndicatorsMultiTF:
         atr = tr.rolling(window=period).mean()
         return atr
 
-    # ---------- ADX ----------
     @staticmethod
     def calculate_adx(data: pd.DataFrame, period: int = 14):
         high, low, close = data['high'], data['low'], data['close']
@@ -388,15 +335,19 @@ class TechnicalIndicatorsMultiTF:
         consensus = weighted_score / total_weight
         return consensus, consensus_details
 
-# ============ 冷却管理器（不变） ============
+# ============ 冷却管理器（适配 GitHub Actions） ============
 class CooldownManager:
     def __init__(self):
         self.config = UltimateConfig.COOLDOWN_CONFIG
         self.cooldown_db = {}
         self.signal_history = defaultdict(list)
         self.cooldown_file = 'cooldown_state.pkl'
-        self.load_state()
-        atexit.register(self.save_state)
+        self.use_persistence = not IN_GITHUB_ACTIONS   # GitHub Actions 中禁用持久化
+        if self.use_persistence:
+            self.load_state()
+            atexit.register(self.save_state)
+        else:
+            print("⚙️ GitHub Actions 模式: 禁用冷却持久化")
 
     def load_state(self):
         try:
@@ -412,6 +363,8 @@ class CooldownManager:
             self.signal_history = defaultdict(list)
 
     def save_state(self):
+        if not self.use_persistence:
+            return
         try:
             data = {
                 'cooldown_db': self.cooldown_db,
@@ -679,7 +632,7 @@ class KLineAnalyzer:
             return False
         return True
 
-# ============ 基础信号检查器 ============
+# ============ 基础信号检查器（增强ATR/ADX支持） ============
 class BaseSignalChecker:
     def __init__(self, pattern_name: str):
         self.pattern_name = pattern_name
@@ -722,7 +675,6 @@ class BaseSignalChecker:
             }
         return indicators
 
-    # ---------- ATR ----------
     def get_atr(self, data: pd.DataFrame, period: int = None) -> Optional[float]:
         if period is None:
             period = UltimateConfig.ATR_CONFIG['period']
@@ -755,7 +707,6 @@ class BaseSignalChecker:
                 tp = entry_price - atr * multiplier
         return round(tp, 6)
 
-    # ---------- ADX市场状态 ----------
     @staticmethod
     def get_market_state(data: pd.DataFrame) -> Dict:
         adx_config = UltimateConfig.ADX_CONFIG
@@ -793,6 +744,1395 @@ class BaseSignalChecker:
             return False
         return True
 
+# ============ 策略具体实现（全9种策略ATR/ADX改造） ============
+
+# ---------- 1. BOUNCE 反弹模式 ----------
+class BounceSignalChecker(BaseSignalChecker):
+    def __init__(self):
+        super().__init__('BOUNCE')
+        self.min_score = self.config.get('min_score', 35)
+
+    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
+        try:
+            if '15m' not in data_dict:
+                return None
+            data = data_dict['15m']
+            if len(data) < 50:
+                return None
+
+            # ADX过滤
+            market_state = self.get_market_state(data)
+            if not self.is_market_allowed(market_state, 'BUY'):
+                return None
+
+            # 获取ATR
+            atr = self.get_atr(data)
+            if atr is None or atr <= 0:
+                return None
+
+            # 指标检查
+            indicators = self.get_multi_timeframe_indicators({'15m': data})['15m']
+            current_rsi = indicators['rsi']
+            if pd.isna(current_rsi) or current_rsi > self.config.get('max_rsi', 42):
+                return None
+            current_volume_ratio = indicators['volume_ratio']
+            if pd.isna(current_volume_ratio) or current_volume_ratio < self.config.get('min_volume_ratio', 0.7):
+                return None
+
+            # 多时间框架共识
+            consensus, _ = TechnicalIndicatorsMultiTF.get_multi_timeframe_consensus(
+                self.get_multi_timeframe_indicators(data_dict), 'BUY')
+            if consensus < 0.6:
+                return None
+
+            # 评分计算
+            score = 45
+            if current_rsi < 30:
+                score += 25
+            elif current_rsi < 35:
+                score += 20
+            elif current_rsi < 40:
+                score += 15
+            if current_volume_ratio > 1.5:
+                score += 20
+            elif current_volume_ratio > 1.2:
+                score += 15
+            elif current_volume_ratio > 0.8:
+                score += 10
+            score = min(100, score + (consensus * 20))
+            if score < self.min_score:
+                return None
+
+            entry_price = data['close'].iloc[-1]
+            # 技术止损：近期低点下方
+            recent_low = data['low'].iloc[-20:].min()
+            tech_stop = recent_low * 0.995
+            # ATR动态止损
+            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'BUY', atr)
+            # 取更严格（更低）的止损
+            stop_loss = min(tech_stop, atr_stop)
+
+            # 止盈：基于风险回报比
+            take_profit = self.calculate_dynamic_take_profit(entry_price, 'BUY', atr, self.risk_reward)
+            risk_reward = (take_profit - entry_price) / (entry_price - stop_loss)
+            if risk_reward < 1.5:
+                return None
+
+            return {
+                'symbol': symbol, 'pattern': 'BOUNCE', 'direction': 'BUY',
+                'score': int(score), 'rsi': round(float(current_rsi), 1),
+                'volume_ratio': round(current_volume_ratio, 2), 'current_price': entry_price,
+                'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit,
+                'risk_reward': round(risk_reward, 1),
+                'atr': round(atr, 4), 'adx': market_state['adx_value'],
+                'market_state': market_state['trend_strength'],
+                'signal_time': datetime.now(), 'signal_type': 'BUY',
+                'confidence': 'HIGH' if score > 75 else 'MEDIUM',
+                'reason': f"RSI超卖({current_rsi:.1f}) + 放量反弹，ATR动态止损"
+            }
+        except Exception:
+            return None
+
+# ---------- 2. BREAKOUT 突破模式 ----------
+class BreakoutSignalChecker(BaseSignalChecker):
+    def __init__(self):
+        super().__init__('BREAKOUT')
+        self.min_score = self.config.get('min_score', 30)
+
+    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
+        try:
+            if '15m' not in data_dict:
+                return None
+            data = data_dict['15m']
+            if len(data) < 50:
+                return None
+
+            market_state = self.get_market_state(data)
+            if not self.is_market_allowed(market_state, 'BUY'):
+                return None
+
+            atr = self.get_atr(data)
+            if atr is None or atr <= 0:
+                return None
+
+            indicators = self.get_multi_timeframe_indicators({'15m': data})['15m']
+            current_rsi = indicators['rsi']
+            conditions = self.config
+            if pd.isna(current_rsi) or not (conditions.get('min_rsi', 45) <= current_rsi <= conditions.get('max_rsi', 68)):
+                return None
+            current_volume_ratio = indicators['volume_ratio']
+            if pd.isna(current_volume_ratio) or current_volume_ratio < conditions.get('min_volume_ratio', 1.2):
+                return None
+
+            # 突破确认：价格高于前20周期高点
+            resistance = data['high'].iloc[-21:-1].max()  # 不包含当前K线
+            if data['close'].iloc[-1] < resistance * 1.01:
+                return None
+
+            consensus, _ = TechnicalIndicatorsMultiTF.get_multi_timeframe_consensus(
+                self.get_multi_timeframe_indicators(data_dict), 'BUY')
+            if consensus < 0.6:
+                return None
+
+            # 评分
+            score = 50
+            if 55 <= current_rsi <= 65:
+                score += 25
+            elif 45 <= current_rsi <= 55:
+                score += 20
+            elif 65 <= current_rsi <= 68:
+                score += 15
+            if current_volume_ratio > 2.0:
+                score += 25
+            elif current_volume_ratio > 1.5:
+                score += 20
+            elif current_volume_ratio > 1.2:
+                score += 15
+            breakout_strength = (data['close'].iloc[-1] - resistance) / resistance * 100
+            if breakout_strength > 2:
+                score += 20
+            elif breakout_strength > 1:
+                score += 15
+            score = min(100, score + (consensus * 20))
+            if score < self.min_score:
+                return None
+
+            entry_price = data['close'].iloc[-1]
+            # 技术止损：突破前高下方
+            tech_stop = resistance * 0.99
+            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'BUY', atr)
+            stop_loss = min(tech_stop, atr_stop)
+
+            take_profit = self.calculate_dynamic_take_profit(entry_price, 'BUY', atr, self.risk_reward)
+            risk_reward = (take_profit - entry_price) / (entry_price - stop_loss)
+            if risk_reward < 1.5:
+                return None
+
+            return {
+                'symbol': symbol, 'pattern': 'BREAKOUT', 'direction': 'BUY',
+                'score': int(score), 'rsi': round(float(current_rsi), 1),
+                'volume_ratio': round(current_volume_ratio, 2), 'current_price': entry_price,
+                'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit,
+                'risk_reward': round(risk_reward, 1),
+                'atr': round(atr, 4), 'adx': market_state['adx_value'],
+                'market_state': market_state['trend_strength'],
+                'signal_time': datetime.now(), 'signal_type': 'BUY',
+                'confidence': 'HIGH' if score > 70 else 'MEDIUM',
+                'reason': f"突破阻力{resistance:.4f}，涨幅{breakout_strength:.1f}%，ATR动态止损"
+            }
+        except Exception:
+            return None
+
+# ---------- 3. BREAKOUT_FAIL_SHORT 突破失败做空 ----------
+class BreakoutFailShortChecker(BaseSignalChecker):
+    def __init__(self):
+        super().__init__('BREAKOUT_FAIL_SHORT')
+        self.min_score = self.config.get('min_score', 35)
+
+    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
+        try:
+            if '15m' not in data_dict:
+                return None
+            data = data_dict['15m']
+            if len(data) < 50:
+                return None
+
+            market_state = self.get_market_state(data)
+            if not self.is_market_allowed(market_state, 'SELL'):
+                return None
+
+            atr = self.get_atr(data)
+            if atr is None or atr <= 0:
+                return None
+
+            indicators = self.get_multi_timeframe_indicators({'15m': data})['15m']
+            current_rsi = indicators['rsi']
+            if pd.isna(current_rsi) or current_rsi < self.config.get('min_rsi', 65):
+                return None
+
+            # 突破失败判定：价格未能站稳前高
+            recent_high = data['high'].iloc[-11:-1].max()  # 前10根高点
+            if data['close'].iloc[-1] > recent_high * 0.99:
+                return None
+            # 跌破短期支撑
+            support = data['low'].iloc[-11:-1].min()
+            if data['close'].iloc[-1] > support * 1.02:
+                return None
+
+            current_volume_ratio = indicators['volume_ratio']
+            if pd.isna(current_volume_ratio) or current_volume_ratio < 0.8:
+                return None
+
+            consensus, _ = TechnicalIndicatorsMultiTF.get_multi_timeframe_consensus(
+                self.get_multi_timeframe_indicators(data_dict), 'SELL')
+            if consensus < 0.6:
+                return None
+
+            score = 40
+            if current_rsi > 75:
+                score += 30
+            elif current_rsi > 70:
+                score += 25
+            elif current_rsi > 65:
+                score += 20
+            if current_volume_ratio > 1.2:
+                score += 20
+            elif current_volume_ratio > 1.0:
+                score += 15
+            elif current_volume_ratio > 0.8:
+                score += 10
+            price_change = (data['close'].iloc[-1] - data['close'].iloc[-5]) / data['close'].iloc[-5] * 100
+            if price_change < -2:
+                score += 15
+            elif price_change < -1:
+                score += 10
+            ma20 = TechnicalIndicatorsMultiTF.calculate_ma(data, 20).iloc[-1]
+            if data['close'].iloc[-1] < ma20:
+                score += 10
+            score = min(100, score + (consensus * 20))
+            if score < self.min_score:
+                return None
+
+            entry_price = data['close'].iloc[-1]
+            # 技术止损：前高上方
+            tech_stop = recent_high * 1.01
+            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'SELL', atr)
+            # 做空止损取较高者（更严格）
+            stop_loss = max(tech_stop, atr_stop)
+
+            take_profit = self.calculate_dynamic_take_profit(entry_price, 'SELL', atr, self.risk_reward)
+            risk_reward = (entry_price - take_profit) / (stop_loss - entry_price)
+            if risk_reward < 1.5:
+                return None
+
+            return {
+                'symbol': symbol, 'pattern': 'BREAKOUT_FAIL_SHORT', 'direction': 'SELL',
+                'score': int(score), 'rsi': round(float(current_rsi), 1),
+                'volume_ratio': round(current_volume_ratio, 2), 'current_price': entry_price,
+                'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit,
+                'risk_reward': round(risk_reward, 1),
+                'atr': round(atr, 4), 'adx': market_state['adx_value'],
+                'market_state': market_state['trend_strength'],
+                'signal_time': datetime.now(), 'signal_type': 'SELL',
+                'confidence': 'HIGH' if score > 75 else 'MEDIUM',
+                'reason': f"高RSI({current_rsi:.1f}) + 突破失败 + 跌破支撑，ATR动态止损"
+            }
+        except Exception:
+            return None
+
+# ---------- 4. TREND 趋势模式 ----------
+class TrendSignalChecker(BaseSignalChecker):
+    def __init__(self):
+        super().__init__('TREND')
+        self.min_score = self.config.get('min_score', 35)
+
+    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
+        try:
+            if '15m' not in data_dict:
+                return None
+            data = data_dict['15m']
+            if len(data) < 50:
+                return None
+
+            market_state = self.get_market_state(data)
+            if not self.is_market_allowed(market_state, 'BUY'):
+                return None
+
+            atr = self.get_atr(data)
+            if atr is None or atr <= 0:
+                return None
+
+            indicators = self.get_multi_timeframe_indicators({'15m': data})['15m']
+            current_rsi = indicators['rsi']
+            conditions = self.config
+            if pd.isna(current_rsi) or not (conditions.get('min_rsi', 40) <= current_rsi <= conditions.get('max_rsi', 75)):
+                return None
+            current_volume_ratio = indicators['volume_ratio']
+            if pd.isna(current_volume_ratio) or current_volume_ratio < conditions.get('min_volume_ratio', 1.0):
+                return None
+
+            # 多时间框架趋势确认
+            uptrend_count = 0
+            for tf, df in data_dict.items():
+                if len(df) >= 30:
+                    ma20_tf = TechnicalIndicatorsMultiTF.calculate_ma(df, 20).iloc[-1]
+                    ma50_tf = TechnicalIndicatorsMultiTF.calculate_ma(df, 50).iloc[-1]
+                    if df['close'].iloc[-1] > ma20_tf > ma50_tf:
+                        uptrend_count += 1
+            if uptrend_count < max(1, len(data_dict) * 0.5):
+                return None
+
+            consensus, _ = TechnicalIndicatorsMultiTF.get_multi_timeframe_consensus(
+                self.get_multi_timeframe_indicators(data_dict), 'BUY')
+            if consensus < 0.6:
+                return None
+
+            score = 60
+            if 50 <= current_rsi <= 70:
+                score += 20
+            elif 40 <= current_rsi <= 50:
+                score += 15
+            if current_volume_ratio > 1.5:
+                score += 20
+            elif current_volume_ratio > 1.2:
+                score += 15
+            ma20 = indicators['ma20']
+            ma50 = indicators['ma50']
+            trend_strength = (ma20 - ma50) / ma50 * 100
+            if trend_strength > 5:
+                score += 15
+            elif trend_strength > 3:
+                score += 10
+            score = min(100, score + (consensus * 20) + (uptrend_count * 5))
+            if score < self.min_score:
+                return None
+
+            entry_price = data['close'].iloc[-1]
+            # 技术止损：MA20下方
+            tech_stop = ma20 * 0.98
+            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'BUY', atr)
+            stop_loss = min(tech_stop, atr_stop)
+
+            take_profit = self.calculate_dynamic_take_profit(entry_price, 'BUY', atr, self.risk_reward)
+            risk_reward = (take_profit - entry_price) / (entry_price - stop_loss)
+            if risk_reward < 1.5:
+                return None
+
+            return {
+                'symbol': symbol, 'pattern': 'TREND', 'direction': 'BUY',
+                'score': int(score), 'rsi': round(float(current_rsi), 1),
+                'volume_ratio': round(current_volume_ratio, 2), 'current_price': entry_price,
+                'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit,
+                'risk_reward': round(risk_reward, 1),
+                'atr': round(atr, 4), 'adx': market_state['adx_value'],
+                'market_state': market_state['trend_strength'],
+                'signal_time': datetime.now(), 'signal_type': 'BUY',
+                'confidence': 'HIGH' if score > 75 else 'MEDIUM',
+                'reason': f"多周期上升趋势，ADX:{market_state['adx_value']}，ATR动态止损"
+            }
+        except Exception:
+            return None
+
+# ---------- 5. CALLBACK 回调模式 ----------
+class CallbackSignalChecker(BaseSignalChecker):
+    def __init__(self):
+        super().__init__('CALLBACK')
+        self.min_score = self.config.get('min_score', 40)
+
+    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
+        try:
+            if '15m' not in data_dict:
+                return None
+            data = data_dict['15m']
+            if len(data) < 50:
+                return None
+
+            market_state = self.get_market_state(data)
+            if not self.is_market_allowed(market_state, 'BUY'):
+                return None
+
+            atr = self.get_atr(data)
+            if atr is None or atr <= 0:
+                return None
+
+            indicators = self.get_multi_timeframe_indicators({'15m': data})['15m']
+            current_rsi = indicators['rsi']
+            if pd.isna(current_rsi) or current_rsi < self.config.get('min_rsi', 55):
+                return None
+
+            # 计算回调幅度
+            recent_high = data['high'].iloc[-30:].max()
+            current_price = data['close'].iloc[-1]
+            callback_pct = ((recent_high - current_price) / recent_high) * 100
+            callback_range = self.config.get('callback_range', {'min': 5, 'max': 15})
+            if not (callback_range['min'] <= callback_pct <= callback_range['max']):
+                return None
+
+            ma20 = indicators['ma20']
+            if current_price < ma20 * 0.95:
+                return None
+
+            consensus, _ = TechnicalIndicatorsMultiTF.get_multi_timeframe_consensus(
+                self.get_multi_timeframe_indicators(data_dict), 'BUY')
+            if consensus < 0.6:
+                return None
+
+            score = 50
+            if 60 <= current_rsi <= 70:
+                score += 20
+            elif current_rsi > 70:
+                score += 15
+            if 8 <= callback_pct <= 12:
+                score += 25
+            elif 5 <= callback_pct <= 15:
+                score += 20
+            volume_ratio = indicators['volume_ratio']
+            if volume_ratio > 0.8:
+                score += 15
+            if current_price > ma20:
+                score += 20
+            score = min(100, score + (consensus * 20))
+            if score < self.min_score:
+                return None
+
+            entry_price = current_price
+            # 技术止损：回调低点下方
+            recent_low = data['low'].iloc[-20:].min()
+            tech_stop = recent_low * 0.995
+            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'BUY', atr)
+            stop_loss = min(tech_stop, atr_stop)
+
+            take_profit = self.calculate_dynamic_take_profit(entry_price, 'BUY', atr, self.risk_reward)
+            risk_reward = (take_profit - entry_price) / (entry_price - stop_loss)
+            if risk_reward < 1.5:
+                return None
+
+            return {
+                'symbol': symbol, 'pattern': 'CALLBACK', 'direction': 'BUY',
+                'score': int(score), 'rsi': round(float(current_rsi), 1),
+                'callback_pct': round(callback_pct, 1), 'current_price': entry_price,
+                'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit,
+                'risk_reward': round(risk_reward, 1),
+                'volume_ratio': round(volume_ratio, 2),
+                'atr': round(atr, 4), 'adx': market_state['adx_value'],
+                'market_state': market_state['trend_strength'],
+                'signal_time': datetime.now(), 'signal_type': 'BUY',
+                'confidence': 'HIGH' if score > 75 else 'MEDIUM',
+                'reason': f"回调至{callback_pct:.1f}%，RSI:{current_rsi:.1f}，ATR动态止损"
+            }
+        except Exception:
+            return None
+
+# ---------- 6. BOUNCE_FAIL_SHORT 反弹失败做空 ----------
+class BounceFailShortChecker(BaseSignalChecker):
+    def __init__(self):
+        super().__init__('BOUNCE_FAIL_SHORT')
+        self.min_score = self.config.get('min_score', 45)
+
+    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
+        try:
+            if '15m' not in data_dict:
+                return None
+            data = data_dict['15m']
+            if len(data) < 50:
+                return None
+
+            market_state = self.get_market_state(data)
+            if not self.is_market_allowed(market_state, 'SELL'):
+                return None
+
+            atr = self.get_atr(data)
+            if atr is None or atr <= 0:
+                return None
+
+            indicators = self.get_multi_timeframe_indicators({'15m': data})['15m']
+            current_rsi = indicators['rsi']
+            rsi_history = TechnicalIndicatorsMultiTF.calculate_rsi(data, 14)
+            rsi_below_30 = rsi_history < 30
+            if not rsi_below_30.any():
+                return None
+            last_rsi_below_30_idx = None
+            for i in range(len(rsi_history) - 1, -1, -1):
+                if rsi_below_30.iloc[i]:
+                    last_rsi_below_30_idx = i
+                    break
+            if last_rsi_below_30_idx is None or len(data) - last_rsi_below_30_idx > self.config.get('lookback_periods', 10):
+                return None
+
+            low_price = data['low'].iloc[last_rsi_below_30_idx]
+            high_after_low = data['high'].iloc[last_rsi_below_30_idx:].max()
+            fib_levels = TechnicalIndicatorsMultiTF.calculate_fibonacci_levels(high_after_low, low_price)
+            fib_38_2 = fib_levels['38.2%']
+            bounce_pct = (high_after_low - low_price) / low_price * 100
+            max_bounce = self.config.get('max_bounce_pct', 2.0)
+            condition_a = bounce_pct < max_bounce
+            condition_b = data['close'].iloc[-1] < fib_38_2
+            if not (condition_a or condition_b):
+                return None
+            if data['close'].iloc[-1] > high_after_low * 0.99:
+                return None
+            volume_ratio = indicators['volume_ratio']
+            if volume_ratio > 1.5:
+                return None
+
+            consensus, _ = TechnicalIndicatorsMultiTF.get_multi_timeframe_consensus(
+                self.get_multi_timeframe_indicators(data_dict), 'SELL')
+            if consensus < 0.7:
+                return None
+
+            score = 50
+            if bounce_pct < 1.0:
+                score += 30
+            elif bounce_pct < 1.5:
+                score += 25
+            elif bounce_pct < 2.0:
+                score += 20
+            if current_rsi < 35:
+                score += 20
+            elif current_rsi < 40:
+                score += 15
+            elif current_rsi < 45:
+                score += 10
+            if volume_ratio < 0.7:
+                score += 20
+            elif volume_ratio < 0.9:
+                score += 15
+            elif volume_ratio < 1.1:
+                score += 10
+            distance_to_fib = abs(data['close'].iloc[-1] - fib_38_2) / fib_38_2 * 100
+            if distance_to_fib > 2:
+                score += 15
+            elif distance_to_fib > 1:
+                score += 10
+            if condition_a and condition_b:
+                score += 25
+            elif condition_a or condition_b:
+                score += 15
+            score = min(100, score + (consensus * 30))
+            if score < self.min_score:
+                return None
+
+            entry_price = data['close'].iloc[-1]
+            # 技术止损：反弹高点上方
+            tech_stop = high_after_low * 1.01
+            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'SELL', atr)
+            stop_loss = max(tech_stop, atr_stop)
+
+            take_profit = self.calculate_dynamic_take_profit(entry_price, 'SELL', atr, self.risk_reward)
+            risk_reward = (entry_price - take_profit) / (stop_loss - entry_price)
+            if risk_reward < 1.5:
+                return None
+
+            return {
+                'symbol': symbol, 'pattern': 'BOUNCE_FAIL_SHORT', 'direction': 'SELL',
+                'score': int(score), 'rsi': round(float(current_rsi), 1),
+                'volume_ratio': round(volume_ratio, 2), 'bounce_pct': round(bounce_pct, 2),
+                'current_price': entry_price, 'entry_price': entry_price,
+                'stop_loss': stop_loss, 'take_profit': take_profit,
+                'risk_reward': round(risk_reward, 1),
+                'atr': round(atr, 4), 'adx': market_state['adx_value'],
+                'market_state': market_state['trend_strength'],
+                'signal_time': datetime.now(), 'signal_type': 'SELL',
+                'confidence': 'HIGH' if score > 75 else 'MEDIUM',
+                'reason': f"反弹乏力({bounce_pct:.1f}%) + 未触38.2%回撤，ATR动态止损"
+            }
+        except Exception:
+            return None
+
+# ---------- 7. TREND_EXHAUSTION 趋势衰竭做空 ----------
+class TrendExhaustionShortChecker(BaseSignalChecker):
+    def __init__(self):
+        super().__init__('TREND_EXHAUSTION')
+        self.min_score = self.config.get('min_score', 55)
+
+    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
+        try:
+            if '15m' not in data_dict or '1H' not in data_dict:
+                return None
+            data_15m = data_dict['15m']
+            data_1h = data_dict['1H']
+            if len(data_15m) < 50 or len(data_1h) < 30:
+                return None
+
+            market_state = self.get_market_state(data_15m)
+            if not self.is_market_allowed(market_state, 'SELL'):
+                return None
+
+            atr = self.get_atr(data_15m)
+            if atr is None or atr <= 0:
+                return None
+
+            current_price = data_15m['close'].iloc[-1]
+            price_30_periods_ago = data_15m['close'].iloc[-30]
+            price_increase = (current_price - price_30_periods_ago) / price_30_periods_ago * 100
+            if price_increase < 15:
+                return None
+
+            conditions = self.config
+            confirmation_signals = 0
+            exhaustion_signals = []
+
+            # 信号1：RSI顶背离
+            rsi_15m = TechnicalIndicatorsMultiTF.calculate_rsi(data_15m, 14)
+            recent_high_idx = data_15m['high'].iloc[-20:].idxmax()
+            recent_rsi_high = rsi_15m.loc[recent_high_idx]
+            current_rsi = rsi_15m.iloc[-1]
+            if current_price > data_15m['high'].loc[recent_high_idx] and current_rsi < recent_rsi_high:
+                confirmation_signals += 1
+                exhaustion_signals.append("RSI顶背离")
+
+            # 信号2：成交量递减
+            volume_ma10 = data_15m['volume'].rolling(window=10).mean()
+            volume_ma20 = data_15m['volume'].rolling(window=20).mean()
+            if volume_ma10.iloc[-1] < volume_ma20.iloc[-1] * 0.8:
+                confirmation_signals += 1
+                exhaustion_signals.append("成交量递减")
+
+            # 信号3：涨幅递减
+            recent_highs = data_15m['high'].iloc[-30:].values
+            highs_increase = []
+            for i in range(1, len(recent_highs)):
+                if recent_highs[i] > recent_highs[i-1]:
+                    increase = (recent_highs[i] - recent_highs[i-1]) / recent_highs[i-1] * 100
+                    highs_increase.append(increase)
+            if len(highs_increase) >= 3:
+                last_3_increases = highs_increase[-3:]
+                if last_3_increases[2] < last_3_increases[1] < last_3_increases[0]:
+                    confirmation_signals += 1
+                    exhaustion_signals.append("涨幅递减")
+
+            # 信号4：MACD背离
+            macd_diff = TechnicalIndicatorsMultiTF.calculate_macd(data_15m)
+            if len(macd_diff) > 10:
+                recent_macd_high_idx = macd_diff.iloc[-20:].idxmax()
+                recent_price_high_idx = data_15m['high'].iloc[-20:].idxmax()
+                if (current_price > data_15m['high'].loc[recent_price_high_idx] and
+                    macd_diff.iloc[-1] < macd_diff.loc[recent_macd_high_idx]):
+                    confirmation_signals += 1
+                    exhaustion_signals.append("MACD背离")
+
+            # 信号5：长上影线
+            recent_kline = data_15m.iloc[-1]
+            if (recent_kline['high'] - max(recent_kline['open'], recent_kline['close'])) > (
+                abs(recent_kline['close'] - recent_kline['open']) * 1.5):
+                confirmation_signals += 1
+                exhaustion_signals.append("长上影线")
+
+            # 1H周期超买
+            rsi_1h = TechnicalIndicatorsMultiTF.calculate_rsi(data_1h, 14)
+            if rsi_1h.iloc[-1] > 70:
+                confirmation_signals += 1
+                exhaustion_signals.append("1H周期超买")
+
+            if confirmation_signals < conditions.get('required_confirmation', 3):
+                return None
+
+            score = 40 + (confirmation_signals * 15)
+            if score < self.min_score:
+                return None
+
+            entry_price = current_price
+            # 技术止损：近期高点上方
+            recent_high = data_15m['high'].iloc[-20:].max()
+            tech_stop = recent_high * 1.01
+            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'SELL', atr)
+            stop_loss = max(tech_stop, atr_stop)
+
+            take_profit = self.calculate_dynamic_take_profit(entry_price, 'SELL', atr, self.risk_reward)
+            risk_reward = (entry_price - take_profit) / (stop_loss - entry_price)
+            if risk_reward < 2.0:
+                return None
+
+            return {
+                'symbol': symbol, 'pattern': 'TREND_EXHAUSTION', 'direction': 'SELL',
+                'rsi': round(float(current_rsi), 1), 'price_increase': round(price_increase, 1),
+                'confirmation_signals': confirmation_signals, 'exhaustion_signals': exhaustion_signals,
+                'score': int(score), 'current_price': entry_price, 'entry_price': entry_price,
+                'stop_loss': stop_loss, 'take_profit': take_profit, 'risk_reward': round(risk_reward, 1),
+                'atr': round(atr, 4), 'adx': market_state['adx_value'],
+                'market_state': market_state['trend_strength'],
+                'signal_time': datetime.now(), 'signal_type': 'SELL',
+                'confidence': 'HIGH' if score > 75 else 'MEDIUM',
+                'reason': f"趋势衰竭({confirmation_signals}个确认信号): {', '.join(exhaustion_signals)}，ATR动态止损"
+            }
+        except Exception:
+            return None
+
+# ---------- 8. BOUNCE_FAIL_CONFIRM_K 反弹失败·确认K做空 ----------
+class BounceFailConfirmKShortChecker(BaseSignalChecker):
+    def __init__(self):
+        super().__init__('BOUNCE_FAIL_CONFIRM_K')
+        self.kline_analyzer = KLineAnalyzer()
+        self.min_score = self.config.get('min_score', 50)
+
+    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
+        try:
+            if '15m' not in data_dict:
+                return None
+            data_15m = data_dict['15m']
+            if len(data_15m) < 50:
+                return None
+
+            # ADX过滤
+            market_state = self.get_market_state(data_15m)
+            if not self.is_market_allowed(market_state, 'SELL'):
+                return None
+
+            # 获取ATR
+            atr = self.get_atr(data_15m)
+            if atr is None or atr <= 0:
+                return None
+
+            bounce_structure = self._identify_bounce_structure(data_15m)
+            if not bounce_structure:
+                return None
+            if not self._check_bounce_failure(data_15m, bounce_structure):
+                return None
+            current_kline = data_15m.iloc[-1]
+            kline_analysis = self.kline_analyzer.analyze_candle(current_kline)
+            if not kline_analysis or kline_analysis['is_bullish']:
+                return None
+            if not self.kline_analyzer.is_confirmation_candle(kline_analysis, 'SELL', self.config):
+                return None
+            if not self._is_first_confirmation_k(data_15m, bounce_structure):
+                return None
+            if not self._check_volume_confirmation(data_15m):
+                return None
+            indicators_ok, indicators_info = self._check_technical_indicators(data_15m)
+            if not indicators_ok:
+                return None
+
+            score = self._calculate_signal_score(data_15m, bounce_structure, kline_analysis, indicators_info)
+            if score < self.min_score:
+                return None
+
+            entry_price = kline_analysis['close']
+            # 技术止损：反弹高点上方
+            tech_stop = bounce_structure['bounce_high'] * 1.01
+            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'SELL', atr)
+            stop_loss = max(tech_stop, atr_stop)
+
+            take_profit = self.calculate_dynamic_take_profit(entry_price, 'SELL', atr, self.risk_reward)
+            risk_reward = (entry_price - take_profit) / (stop_loss - entry_price)
+            if risk_reward < 1.5:
+                return None
+
+            return {
+                'symbol': symbol, 'pattern': 'BOUNCE_FAIL_CONFIRM_K', 'direction': 'SELL',
+                'score': int(score), 'current_price': entry_price, 'entry_price': entry_price,
+                'stop_loss': stop_loss, 'take_profit': take_profit, 'risk_reward': round(risk_reward, 2),
+                'rsi': indicators_info.get('rsi', 50), 'volume_ratio': indicators_info.get('volume_ratio', 1),
+                'atr': round(atr, 4), 'adx': market_state['adx_value'],
+                'market_state': market_state['trend_strength'],
+                'confirmation_k_info': {
+                    'is_bullish': kline_analysis['is_bullish'],
+                    'entity_ratio': round(kline_analysis['entity_ratio'], 2),
+                    'lower_shadow_ratio': round(kline_analysis['lower_shadow_ratio'], 2),
+                    'body_size': round(kline_analysis['body_size'], 4)
+                },
+                'is_first_confirmation_k': True, 'signal_time': datetime.now(),
+                'signal_type': 'SELL', 'confidence': 'HIGH' if score > 70 else 'MEDIUM',
+                'reason': f"反弹失败确认K做空 | 反弹幅度:{bounce_structure['bounce_pct']:.1f}% | 确认K实体:{kline_analysis['entity_ratio']:.0%} | ATR动态止损"
+            }
+        except Exception:
+            return None
+
+    def _identify_bounce_structure(self, data: pd.DataFrame) -> Dict:
+        if len(data) < 30:
+            return None
+        recent_low_idx = data['low'].iloc[-30:].idxmin()
+        recent_low = data['low'].loc[recent_low_idx]
+        after_low_data = data.loc[recent_low_idx:]
+        if len(after_low_data) < 3:
+            return None
+        bounce_high_idx = after_low_data['high'].idxmax()
+        bounce_high = after_low_data['high'].loc[bounce_high_idx]
+        bounce_pct = (bounce_high - recent_low) / recent_low * 100
+        if bounce_pct < 1.0:
+            return None
+        fib_levels = TechnicalIndicatorsMultiTF.calculate_fibonacci_levels(bounce_high, recent_low)
+        return {
+            'bounce_low': recent_low, 'bounce_high': bounce_high, 'bounce_pct': bounce_pct,
+            'fib_levels': fib_levels,
+            'bounce_peak_index': data.index.get_loc(bounce_high_idx)
+        }
+
+    def _check_bounce_failure(self, data: pd.DataFrame, bounce_structure: Dict) -> bool:
+        current_price = data['close'].iloc[-1]
+        bounce_high = bounce_structure['bounce_high']
+        fib_38_2 = bounce_structure['fib_levels']['38.2%']
+        if current_price > bounce_high * 0.99:
+            return False
+        if current_price > fib_38_2:
+            return False
+        if bounce_structure['bounce_pct'] > 8:
+            return False
+        return True
+
+    def _is_first_confirmation_k(self, data: pd.DataFrame, bounce_structure: Dict) -> bool:
+        bounce_peak_idx = bounce_structure['bounce_peak_index']
+        current_idx = len(data) - 1
+        bearish_count = 0
+        for i in range(bounce_peak_idx + 1, current_idx + 1):
+            if i >= len(data):
+                break
+            kline = data.iloc[i]
+            kline_analysis = self.kline_analyzer.analyze_candle(kline)
+            if not kline_analysis:
+                continue
+            if kline_analysis['is_bullish']:
+                bearish_count = 0
+            else:
+                bearish_count += 1
+                if kline_analysis['entity_ratio'] >= self.config.get('min_entity_ratio', 0.6):
+                    if i == current_idx and bearish_count == 1:
+                        return True
+        return False
+
+    def _check_volume_confirmation(self, data: pd.DataFrame) -> bool:
+        if len(data) < 20:
+            return False
+        current_volume = data['volume'].iloc[-1]
+        avg_volume = data['volume'].rolling(window=20).mean().iloc[-1]
+        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
+        return volume_ratio >= 0.5
+
+    def _check_technical_indicators(self, data: pd.DataFrame) -> Tuple[bool, Dict]:
+        info = {}
+        rsi = TechnicalIndicatorsMultiTF.calculate_rsi(data, 14)
+        current_rsi = rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50
+        info['rsi'] = round(current_rsi, 1)
+        if current_rsi < 35:
+            return False, info
+        volume_ratio = TechnicalIndicatorsMultiTF.calculate_volume_ratio(data, 20)
+        current_volume_ratio = volume_ratio.iloc[-1] if not pd.isna(volume_ratio.iloc[-1]) else 1
+        info['volume_ratio'] = round(current_volume_ratio, 2)
+        ma20 = TechnicalIndicatorsMultiTF.calculate_ma(data, 20).iloc[-1]
+        if data['close'].iloc[-1] > ma20 * 1.05:
+            return False, info
+        return True, info
+
+    def _calculate_signal_score(self, data: pd.DataFrame, bounce_structure: Dict,
+                               kline_analysis: Dict, indicators_info: Dict) -> int:
+        score = 50
+        bounce_pct = bounce_structure['bounce_pct']
+        if bounce_pct < 2.0:
+            score += 20
+        elif bounce_pct < 3.0:
+            score += 15
+        elif bounce_pct < 4.0:
+            score += 10
+        entity_ratio = kline_analysis['entity_ratio']
+        if entity_ratio > 0.8:
+            score += 20
+        elif entity_ratio > 0.7:
+            score += 15
+        elif entity_ratio > 0.6:
+            score += 10
+        rsi = indicators_info.get('rsi', 50)
+        if rsi > 60:
+            score += 15
+        elif rsi > 55:
+            score += 10
+        volume_ratio = indicators_info.get('volume_ratio', 1)
+        if volume_ratio > 1.2:
+            score += 10
+        elif volume_ratio > 0.8:
+            score += 5
+        return min(score, 100)
+
+# ---------- 9. CALLBACK_CONFIRM_K 回调企稳·确认K做多 ----------
+class CallbackConfirmKBuyChecker(BaseSignalChecker):
+    def __init__(self):
+        super().__init__('CALLBACK_CONFIRM_K')
+        self.kline_analyzer = KLineAnalyzer()
+        self.min_score = self.config.get('min_score', 50)
+
+    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
+        try:
+            if '15m' not in data_dict:
+                return None
+            data_15m = data_dict['15m']
+            if len(data_15m) < 50:
+                return None
+
+            market_state = self.get_market_state(data_15m)
+            if not self.is_market_allowed(market_state, 'BUY'):
+                return None
+
+            atr = self.get_atr(data_15m)
+            if atr is None or atr <= 0:
+                return None
+
+            callback_structure = self._identify_callback_structure(data_15m)
+            if not callback_structure:
+                return None
+            if not self._check_callback_stabilization(data_15m, callback_structure):
+                return None
+            current_kline = data_15m.iloc[-1]
+            kline_analysis = self.kline_analyzer.analyze_candle(current_kline)
+            if not kline_analysis or not kline_analysis['is_bullish']:
+                return None
+            if not self.kline_analyzer.is_confirmation_candle(kline_analysis, 'BUY', self.config):
+                return None
+            if not self._is_first_confirmation_k(data_15m, callback_structure):
+                return None
+            if not self._check_volume_confirmation(data_15m):
+                return None
+            indicators_ok, indicators_info = self._check_technical_indicators(data_15m)
+            if not indicators_ok:
+                return None
+
+            score = self._calculate_signal_score(data_15m, callback_structure, kline_analysis, indicators_info)
+            if score < self.min_score:
+                return None
+
+            entry_price = kline_analysis['close']
+            # 技术止损：回调低点下方
+            tech_stop = callback_structure['callback_low'] * 0.995
+            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'BUY', atr)
+            stop_loss = min(tech_stop, atr_stop)
+
+            take_profit = self.calculate_dynamic_take_profit(entry_price, 'BUY', atr, self.risk_reward)
+            risk_reward = (take_profit - entry_price) / (entry_price - stop_loss)
+            if risk_reward < 1.5:
+                return None
+
+            return {
+                'symbol': symbol, 'pattern': 'CALLBACK_CONFIRM_K', 'direction': 'BUY',
+                'score': int(score), 'current_price': entry_price, 'entry_price': entry_price,
+                'stop_loss': stop_loss, 'take_profit': take_profit, 'risk_reward': round(risk_reward, 2),
+                'rsi': indicators_info.get('rsi', 50), 'volume_ratio': indicators_info.get('volume_ratio', 1),
+                'atr': round(atr, 4), 'adx': market_state['adx_value'],
+                'market_state': market_state['trend_strength'],
+                'confirmation_k_info': {
+                    'is_bullish': kline_analysis['is_bullish'],
+                    'entity_ratio': round(kline_analysis['entity_ratio'], 2),
+                    'upper_shadow_ratio': round(kline_analysis['upper_shadow_ratio'], 2),
+                    'body_size': round(kline_analysis['body_size'], 4)
+                },
+                'is_first_confirmation_k': True, 'signal_time': datetime.now(),
+                'signal_type': 'BUY', 'confidence': 'HIGH' if score > 70 else 'MEDIUM',
+                'reason': f"回调企稳确认K做多 | 回调幅度:{callback_structure['callback_pct']:.1f}% | 确认K实体:{kline_analysis['entity_ratio']:.0%} | ATR动态止损"
+            }
+        except Exception:
+            return None
+
+    def _identify_callback_structure(self, data: pd.DataFrame) -> Dict:
+        if len(data) < 30:
+            return None
+        recent_high_idx = data['high'].iloc[-30:].idxmax()
+        recent_high = data['high'].loc[recent_high_idx]
+        after_high_data = data.loc[recent_high_idx:]
+        if len(after_high_data) < 3:
+            return None
+        callback_low_idx = after_high_data['low'].idxmin()
+        callback_low = after_high_data['low'].loc[callback_low_idx]
+        callback_pct = (recent_high - callback_low) / recent_high * 100
+        if callback_pct < 3.0:
+            return None
+        fib_levels = TechnicalIndicatorsMultiTF.calculate_fibonacci_levels(recent_high, callback_low)
+        return {
+            'callback_high': recent_high, 'callback_low': callback_low, 'callback_pct': callback_pct,
+            'fib_levels': fib_levels,
+            'callback_low_index': data.index.get_loc(callback_low_idx)
+        }
+
+    def _check_callback_stabilization(self, data: pd.DataFrame, callback_structure: Dict) -> bool:
+        current_price = data['close'].iloc[-1]
+        callback_low = callback_structure['callback_low']
+        if current_price < callback_low * 0.995:
+            return False
+        fib_61_8 = callback_structure['fib_levels']['61.8%']
+        if current_price < fib_61_8 * 0.99:
+            return False
+        callback_pct = callback_structure['callback_pct']
+        if callback_pct < 5 or callback_pct > 20:
+            return False
+        return True
+
+    def _is_first_confirmation_k(self, data: pd.DataFrame, callback_structure: Dict) -> bool:
+        callback_low_idx = callback_structure['callback_low_index']
+        current_idx = len(data) - 1
+        bullish_count = 0
+        for i in range(callback_low_idx + 1, current_idx + 1):
+            if i >= len(data):
+                break
+            kline = data.iloc[i]
+            kline_analysis = self.kline_analyzer.analyze_candle(kline)
+            if not kline_analysis:
+                continue
+            if not kline_analysis['is_bullish']:
+                bullish_count = 0
+            else:
+                bullish_count += 1
+                if kline_analysis['entity_ratio'] >= self.config.get('min_entity_ratio', 0.6):
+                    if i == current_idx and bullish_count == 1:
+                        return True
+        return False
+
+    def _check_volume_confirmation(self, data: pd.DataFrame) -> bool:
+        if len(data) < 20:
+            return False
+        current_volume = data['volume'].iloc[-1]
+        avg_volume = data['volume'].rolling(window=20).mean().iloc[-1]
+        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
+        return volume_ratio >= 0.8
+
+    def _check_technical_indicators(self, data: pd.DataFrame) -> Tuple[bool, Dict]:
+        info = {}
+        rsi = TechnicalIndicatorsMultiTF.calculate_rsi(data, 14)
+        current_rsi = rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50
+        info['rsi'] = round(current_rsi, 1)
+        if current_rsi > 70:
+            return False, info
+        volume_ratio = TechnicalIndicatorsMultiTF.calculate_volume_ratio(data, 20)
+        current_volume_ratio = volume_ratio.iloc[-1] if not pd.isna(volume_ratio.iloc[-1]) else 1
+        info['volume_ratio'] = round(current_volume_ratio, 2)
+        ma20 = TechnicalIndicatorsMultiTF.calculate_ma(data, 20).iloc[-1]
+        if data['close'].iloc[-1] < ma20 * 0.95:
+            return False, info
+        return True, info
+
+    def _calculate_signal_score(self, data: pd.DataFrame, callback_structure: Dict,
+                               kline_analysis: Dict, indicators_info: Dict) -> int:
+        score = 50
+        callback_pct = callback_structure['callback_pct']
+        if 5 <= callback_pct <= 10:
+            score += 20
+        elif 10 < callback_pct <= 15:
+            score += 15
+        elif 3 <= callback_pct <= 20:
+            score += 10
+        entity_ratio = kline_analysis['entity_ratio']
+        if entity_ratio > 0.8:
+            score += 20
+        elif entity_ratio > 0.7:
+            score += 15
+        elif entity_ratio > 0.6:
+            score += 10
+        rsi = indicators_info.get('rsi', 50)
+        if rsi < 40:
+            score += 15
+        elif rsi < 45:
+            score += 10
+        volume_ratio = indicators_info.get('volume_ratio', 1)
+        if volume_ratio > 1.5:
+            score += 15
+        elif volume_ratio > 1.2:
+            score += 10
+        return min(score, 100)
+
+# ============ 回测引擎 ============
+class BacktestEngine:
+    def __init__(self, config: Dict, data_fetcher: OKXDataFetcher):
+        self.config = config
+        self.data_fetcher = data_fetcher
+        self.signal_checkers = self._init_checkers()
+
+    def _init_checkers(self):
+        checkers = {}
+        for mode in UltimateConfig.MARKET_MODES:
+            if UltimateConfig.MARKET_MODES[mode]['enabled']:
+                try:
+                    if mode == 'BOUNCE':
+                        checkers[mode] = BounceSignalChecker()
+                    elif mode == 'BREAKOUT':
+                        checkers[mode] = BreakoutSignalChecker()
+                    elif mode == 'BREAKOUT_FAIL_SHORT':
+                        checkers[mode] = BreakoutFailShortChecker()
+                    elif mode == 'TREND':
+                        checkers[mode] = TrendSignalChecker()
+                    elif mode == 'CALLBACK':
+                        checkers[mode] = CallbackSignalChecker()
+                    elif mode == 'BOUNCE_FAIL_SHORT':
+                        checkers[mode] = BounceFailShortChecker()
+                    elif mode == 'TREND_EXHAUSTION':
+                        checkers[mode] = TrendExhaustionShortChecker()
+                    elif mode == 'BOUNCE_FAIL_CONFIRM_K':
+                        checkers[mode] = BounceFailConfirmKShortChecker()
+                    elif mode == 'CALLBACK_CONFIRM_K':
+                        checkers[mode] = CallbackConfirmKBuyChecker()
+                except Exception as e:
+                    print(f"⚠️ 回测加载策略 {mode} 失败: {e}")
+        return checkers
+
+    def run(self):
+        print("\n" + "="*70)
+        print("🚀 开始回测 (最长2星期)")
+        print(f"📅 时间范围: {self.config['start_date']} 至 {self.config['end_date']}")
+        print(f"📊 回测币种: {', '.join(self.config['symbols'])}")
+        print(f"💵 初始资金: ${self.config['initial_capital']:,.2f}")
+        print(f"💸 手续费: {self.config['commission']*100:.2f}% | 滑点: {self.config['slippage']*100:.2f}%")
+        print("="*70)
+
+        total_pnl = 0
+        total_trades = 0
+        winning_trades = 0
+        equity = self.config['initial_capital']
+        trades = []
+
+        for symbol in self.config['symbols']:
+            print(f"\n🔍 回测 {symbol} ...")
+            df = self.data_fetcher.get_historical_candles(
+                symbol, self.config['interval'],
+                self.config['start_date'], self.config['end_date']
+            )
+            if df is None or len(df) < 50:
+                print(f"⚠️ {symbol} 数据不足，跳过")
+                continue
+
+            for i in range(50, len(df)):
+                current_data = df.iloc[:i+1]
+                data_dict = {self.config['interval']: current_data}
+                for name, checker in self.signal_checkers.items():
+                    signal = checker.check_coin_multi_tf(symbol, data_dict)
+                    if signal:
+                        entry_price = signal['entry_price']
+                        stop_loss = signal['stop_loss']
+                        take_profit = signal['take_profit']
+                        direction = signal['direction']
+
+                        commission = self.config['commission']
+                        slippage = self.config['slippage']
+                        if direction == 'BUY':
+                            exec_price = entry_price * (1 + slippage)
+                        else:
+                            exec_price = entry_price * (1 - slippage)
+
+                        exit_price = None
+                        exit_reason = None
+                        for j in range(i+1, len(df)):
+                            bar = df.iloc[j]
+                            if direction == 'BUY':
+                                if bar['low'] <= stop_loss:
+                                    exit_price = stop_loss * (1 - slippage)
+                                    exit_reason = 'STOP_LOSS'
+                                    break
+                                elif bar['high'] >= take_profit:
+                                    exit_price = take_profit * (1 + slippage)
+                                    exit_reason = 'TAKE_PROFIT'
+                                    break
+                            else:
+                                if bar['high'] >= stop_loss:
+                                    exit_price = stop_loss * (1 + slippage)
+                                    exit_reason = 'STOP_LOSS'
+                                    break
+                                elif bar['low'] <= take_profit:
+                                    exit_price = take_profit * (1 - slippage)
+                                    exit_reason = 'TAKE_PROFIT'
+                                    break
+
+                        if exit_price is None:
+                            last_close = df['close'].iloc[-1]
+                            if direction == 'BUY':
+                                exit_price = last_close * (1 - slippage)
+                            else:
+                                exit_price = last_close * (1 + slippage)
+                            exit_reason = 'EXPIRED'
+
+                        if direction == 'BUY':
+                            pnl = (exit_price - exec_price) * (1 - commission)
+                        else:
+                            pnl = (exec_price - exit_price) * (1 - commission)
+
+                        equity += pnl
+                        total_pnl += pnl
+                        total_trades += 1
+                        if pnl > 0:
+                            winning_trades += 1
+
+                        trades.append({
+                            'time': df.index[i],
+                            'symbol': symbol,
+                            'direction': direction,
+                            'entry': exec_price,
+                            'exit': exit_price,
+                            'pnl': pnl,
+                            'reason': exit_reason
+                        })
+
+                        print(f"   {df.index[i].strftime('%m-%d %H:%M')} {symbol} {direction} "
+                              f"入场:{exec_price:.4f} 离场:{exit_price:.4f} "
+                              f"盈亏:${pnl:.2f} ({exit_reason})")
+
+        print("\n" + "="*70)
+        print("📊 回测统计")
+        print("="*70)
+        print(f"初始资金: ${self.config['initial_capital']:,.2f}")
+        print(f"最终权益: ${equity:,.2f}")
+        print(f"总盈亏: ${total_pnl:,.2f}  ({total_pnl/self.config['initial_capital']*100:+.2f}%)")
+        print(f"总交易次数: {total_trades}")
+        if total_trades > 0:
+            win_rate = (winning_trades / total_trades) * 100
+            print(f"胜率: {win_rate:.2f}% ({winning_trades}/{total_trades})")
+            avg_pnl = total_pnl / total_trades
+            print(f"平均盈亏: ${avg_pnl:.2f}")
+        print("="*70)
+        return {
+            'total_pnl': total_pnl,
+            'total_trades': total_trades,
+            'win_rate': win_rate if total_trades > 0 else 0,
+            'equity': equity,
+            'trades': trades
+        }
+
+# ============ 主系统 ============
+class UltimateTradingSystem:
+    def __init__(self, telegram_bot_token=None, telegram_chat_id=None):
+        print("🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀")
+        print("🚀 终极智能交易系统 v34.0 全策略ATR/ADX适配版")
+        print("🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀")
+        self.config = UltimateConfig
+        self.coins = MONITOR_COINS[:self.config.COINS_TO_MONITOR]
+        self.analysis_cycle_count = 0
+        self.no_signal_count = 0
+        self.start_time = datetime.now()
+        self.cooldown_manager = CooldownManager()
+        self.data_fetcher = OKXDataFetcher()
+        self.signal_checkers = {}
+        self.init_signal_checkers()
+        if telegram_bot_token and telegram_chat_id:
+            try:
+                self.telegram = UltimateTelegramNotifier(telegram_bot_token, telegram_chat_id)
+            except Exception as e:
+                print(f"⚠️ Telegram通知器初始化失败: {e}")
+                self.telegram = None
+        else:
+            self.telegram = None
+        self.stats = {
+            'total_signals': 0, 'buy_signals': 0, 'sell_signals': 0,
+            'signals_today': defaultdict(int)
+        }
+        print("\n✅ 系统初始化完成")
+        print("=" * 70)
+
+    def init_signal_checkers(self):
+        print("\n🔄 初始化信号检查器...")
+        checkers_map = {
+            'BOUNCE': BounceSignalChecker,
+            'BREAKOUT': BreakoutSignalChecker,
+            'BREAKOUT_FAIL_SHORT': BreakoutFailShortChecker,
+            'TREND': TrendSignalChecker,
+            'CALLBACK': CallbackSignalChecker,
+            'BOUNCE_FAIL_SHORT': BounceFailShortChecker,
+            'TREND_EXHAUSTION': TrendExhaustionShortChecker,
+            'BOUNCE_FAIL_CONFIRM_K': BounceFailConfirmKShortChecker,
+            'CALLBACK_CONFIRM_K': CallbackConfirmKBuyChecker
+        }
+        for mode, checker_class in checkers_map.items():
+            try:
+                if self.config.MARKET_MODES.get(mode, {}).get('enabled', False):
+                    self.signal_checkers[mode] = checker_class()
+                    print(f"   ✅ {mode}: {checker_class.__name__}")
+                else:
+                    print(f"   ⚠️ {mode}: 已禁用")
+            except Exception as e:
+                print(f"   ❌ {mode}: 初始化失败 - {str(e)}")
+        print(f"✅ 已初始化 {len(self.signal_checkers)} 个信号检查器")
+
+    def get_coins_data(self):
+        print("📊 获取实时市场数据...")
+        return self.data_fetcher.get_all_coins_data(self.coins)
+
+    def run_multi_mode_analysis(self, coins_data):
+        if not coins_data:
+            return []
+        print(f"🔄 运行多模式分析 ({len(coins_data)}个币种)...")
+        all_signals = []
+        for mode, checker in self.signal_checkers.items():
+            print(f"🤖 检查{mode}模式...")
+            mode_signals = []
+            for symbol, data_dict in coins_data.items():
+                direction = 'SELL' if mode in ['BREAKOUT_FAIL_SHORT', 'BOUNCE_FAIL_SHORT',
+                                              'TREND_EXHAUSTION', 'BOUNCE_FAIL_CONFIRM_K'] else 'BUY'
+                cooldown_ok, _ = self.cooldown_manager.check_cooldown(symbol, direction)
+                if not cooldown_ok:
+                    continue
+                signal = checker.check_coin_multi_tf(symbol, data_dict)
+                if signal:
+                    mode_signals.append(signal)
+            if mode_signals:
+                print(f"✅ {mode}模式发现 {len(mode_signals)} 个信号")
+                all_signals.extend(mode_signals)
+            else:
+                print(f"📊 {mode}模式未发现信号")
+        unique = {}
+        for s in all_signals:
+            sym = s['symbol']
+            if sym not in unique or s['score'] > unique[sym]['score']:
+                unique[sym] = s
+        final = list(unique.values())
+        final.sort(key=lambda x: x.get('score', 0), reverse=True)
+        return final[:self.config.MAX_SIGNALS]
+
+    def process_signals(self, signals):
+        if not signals:
+            if self.telegram:
+                try:
+                    no_signal_msg = f"""
+📊 <b>本轮分析结果</b>
+━━━━━━━━━━━━━━━━━━━━
+🔍 分析时间: {datetime.now().strftime('%H:%M:%S')}
+📊 扫描币种: {len(self.coins)}个
+❌ 未发现符合条件的交易信号
+━━━━━━━━━━━━━━━━━━━━
+💡 <i>市场可能没有明显机会，建议观望</i>
+⏰ 下次分析: {self.config.ANALYSIS_INTERVAL}分钟后
+"""
+                    self.telegram.bot.send_message(self.telegram.chat_id, no_signal_msg, parse_mode='HTML')
+                except:
+                    pass
+            return
+        sorted_signals = sorted(signals, key=lambda x: x.get('score', 0), reverse=True)
+        if self.telegram:
+            self.telegram.send_top_3_signals(sorted_signals)
+        for signal in sorted_signals:
+            cooldown_ok, _ = self.cooldown_manager.check_cooldown(
+                signal['symbol'], signal['direction']
+            )
+            if cooldown_ok:
+                self.cooldown_manager.record_signal(
+                    signal['symbol'], signal['direction'],
+                    signal['pattern'], signal['score']
+                )
+                self.stats['total_signals'] += 1
+                if signal['direction'] == 'BUY':
+                    self.stats['buy_signals'] += 1
+                else:
+                    self.stats['sell_signals'] += 1
+                today = datetime.now().strftime('%Y-%m-%d')
+                self.stats['signals_today'][today] += 1
+        print(f"\n✅ 已处理 {len(sorted_signals)} 个信号")
+
+    def run_analysis_cycle_enhanced(self):
+        try:
+            self.analysis_cycle_count += 1
+            print("\n" + "="*70)
+            print(f"🤖 第 {self.analysis_cycle_count} 次智能分析周期 (v{self.config.VERSION})")
+            print("="*70)
+            coins_data = self.get_coins_data()
+            if not coins_data or len(coins_data) < 10:
+                print("❌ 数据获取失败或数据不足，跳过本次分析")
+                return []
+            signals = self.run_multi_mode_analysis(coins_data)
+            if signals:
+                self.process_signals(signals)
+                self.no_signal_count = 0
+            else:
+                print("\n📊 本次分析未发现符合条件的交易信号")
+                self.no_signal_count += 1
+            next_time = datetime.now() + timedelta(minutes=self.config.ANALYSIS_INTERVAL)
+            print(f"\n⏳ 下次分析: {self.config.ANALYSIS_INTERVAL}分钟后 ({next_time.strftime('%H:%M:%S')})")
+            return signals
+        except Exception as e:
+            print(f"\n❌ 分析周期失败: {str(e)}")
+            traceback.print_exc()
+            return []
+
+    def run_single_cycle(self):
+        print("\n🚀 立即运行分析周期...")
+        return self.run_analysis_cycle_enhanced()
+
+    def run_continuous(self):
+        print("\n🚀 系统将在3秒后自动启动连续监控模式...")
+        for i in range(3, 0, -1):
+            print(f"  {i}...")
+            time.sleep(1)
+        print("\n🚀 终极系统开始自动连续运行...")
+        print("💡 按 Ctrl+C 停止\n")
+        self.run_analysis_cycle_enhanced()
+        while True:
+            try:
+                time.sleep(self.config.ANALYSIS_INTERVAL * 60)
+                self.run_analysis_cycle_enhanced()
+            except KeyboardInterrupt:
+                print("\n\n🛑 系统被用户中断")
+                break
+            except Exception as e:
+                print(f"\n❌ 运行出错: {e}")
+                time.sleep(60)
+
 # ============ Telegram通知器 ============
 class UltimateTelegramNotifier:
     def __init__(self, bot_token, chat_id):
@@ -801,7 +2141,14 @@ class UltimateTelegramNotifier:
         self.config = UltimateConfig.TELEGRAM_CONFIG
         self.message_history = deque(maxlen=100)
         self.test_connection()
-        self.send_startup_message()
+        if not IN_GITHUB_ACTIONS:
+            self.send_startup_message()
+        else:
+            # GitHub Actions 中只发送一个简短运行通知（可选）
+            try:
+                self.bot.send_message(self.chat_id, "🔁 GitHub Actions 自动分析已启动", parse_mode='HTML')
+            except:
+                pass
 
     def send_startup_message(self):
         try:
@@ -813,8 +2160,8 @@ class UltimateTelegramNotifier:
 ⏰ 分析间隔: {UltimateConfig.ANALYSIS_INTERVAL}分钟
 🔍 分析周期: {', '.join(UltimateConfig.MULTI_TIMEFRAME_CONFIG['timeframes'])}
 ⚙️ 动态止损: ATR×{UltimateConfig.ATR_CONFIG['stop_loss_multiplier']}
-⚙️ 市场过滤: ADX≥{UltimateConfig.ADX_CONFIG['trend_threshold']} (仅极强趋势过滤)
-⚙️ 宽松参数版 - 立即产生信号
+⚙️ 市场过滤: ADX≥{UltimateConfig.ADX_CONFIG['trend_threshold']}
+⚙️ 全策略ATR/ADX适配
 ━━━━━━━━━━━━━━━━━━━━
 <code>系统状态: ✅ 运行中</code>
 """
@@ -1063,1409 +2410,12 @@ class UltimateTelegramNotifier:
         except Exception as e:
             print(f"❌ 发送批量总结失败: {e}")
 
-# ============ 策略具体实现（全9种策略ATR/ADX改造）============
-
-# ---------- 1. BOUNCE 反弹模式 ----------
-class BounceSignalChecker(BaseSignalChecker):
-    def __init__(self):
-        super().__init__('BOUNCE')
-        self.min_score = self.config.get('min_score', 35)
-
-    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
-        try:
-            if '15m' not in data_dict:
-                return None
-            data = data_dict['15m']
-            if len(data) < 50:
-                return None
-
-            # ADX过滤
-            market_state = self.get_market_state(data)
-            if not self.is_market_allowed(market_state, 'BUY'):
-                return None
-
-            # 获取ATR
-            atr = self.get_atr(data)
-            if atr is None or atr <= 0:
-                return None
-
-            # 指标检查
-            indicators = self.get_multi_timeframe_indicators({'15m': data})['15m']
-            current_rsi = indicators['rsi']
-            if pd.isna(current_rsi) or current_rsi > self.config.get('max_rsi', 50):
-                return None
-            current_volume_ratio = indicators['volume_ratio']
-            if pd.isna(current_volume_ratio) or current_volume_ratio < self.config.get('min_volume_ratio', 0.6):
-                return None
-
-            # 多时间框架共识
-            consensus, _ = TechnicalIndicatorsMultiTF.get_multi_timeframe_consensus(
-                self.get_multi_timeframe_indicators(data_dict), 'BUY')
-            if consensus < 0.6:
-                return None
-
-            # 评分计算
-            score = 45
-            if current_rsi < 30:
-                score += 25
-            elif current_rsi < 35:
-                score += 20
-            elif current_rsi < 40:
-                score += 15
-            if current_volume_ratio > 1.5:
-                score += 20
-            elif current_volume_ratio > 1.2:
-                score += 15
-            elif current_volume_ratio > 0.8:
-                score += 10
-            score = min(100, score + (consensus * 20))
-            if score < self.min_score:
-                return None
-
-            entry_price = data['close'].iloc[-1]
-            # 技术止损：近期低点下方
-            recent_low = data['low'].iloc[-20:].min()
-            tech_stop = recent_low * 0.995
-            # ATR动态止损
-            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'BUY', atr)
-            # 取更严格（更低）的止损
-            stop_loss = min(tech_stop, atr_stop)
-
-            # 止盈：基于风险回报比
-            take_profit = self.calculate_dynamic_take_profit(entry_price, 'BUY', atr, self.risk_reward)
-            risk_reward = (take_profit - entry_price) / (entry_price - stop_loss)
-            if risk_reward < 1.5:
-                return None
-
-            return {
-                'symbol': symbol, 'pattern': 'BOUNCE', 'direction': 'BUY',
-                'score': int(score), 'rsi': round(float(current_rsi), 1),
-                'volume_ratio': round(current_volume_ratio, 2), 'current_price': entry_price,
-                'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit,
-                'risk_reward': round(risk_reward, 1),
-                'atr': round(atr, 4), 'adx': market_state['adx_value'],
-                'market_state': market_state['trend_strength'],
-                'signal_time': datetime.now(), 'signal_type': 'BUY',
-                'confidence': 'HIGH' if score > 75 else 'MEDIUM',
-                'reason': f"RSI超卖({current_rsi:.1f}) + 放量反弹，ATR动态止损"
-            }
-        except Exception:
-            return None
-
-# ---------- 2. BREAKOUT 突破模式 ----------
-class BreakoutSignalChecker(BaseSignalChecker):
-    def __init__(self):
-        super().__init__('BREAKOUT')
-        self.min_score = self.config.get('min_score', 25)
-
-    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
-        try:
-            if '15m' not in data_dict:
-                return None
-            data = data_dict['15m']
-            if len(data) < 50:
-                return None
-
-            market_state = self.get_market_state(data)
-            if not self.is_market_allowed(market_state, 'BUY'):
-                return None
-
-            atr = self.get_atr(data)
-            if atr is None or atr <= 0:
-                return None
-
-            indicators = self.get_multi_timeframe_indicators({'15m': data})['15m']
-            current_rsi = indicators['rsi']
-            conditions = self.config
-            if pd.isna(current_rsi) or not (conditions.get('min_rsi', 40) <= current_rsi <= conditions.get('max_rsi', 75)):
-                return None
-            current_volume_ratio = indicators['volume_ratio']
-            if pd.isna(current_volume_ratio) or current_volume_ratio < conditions.get('min_volume_ratio', 0.9):
-                return None
-
-            # 突破确认：价格高于前20周期高点
-            resistance = data['high'].iloc[-21:-1].max()  # 不包含当前K线
-            if data['close'].iloc[-1] < resistance * 1.005:  # 放宽突破幅度
-                return None
-
-            consensus, _ = TechnicalIndicatorsMultiTF.get_multi_timeframe_consensus(
-                self.get_multi_timeframe_indicators(data_dict), 'BUY')
-            if consensus < 0.6:
-                return None
-
-            # 评分
-            score = 50
-            if 55 <= current_rsi <= 65:
-                score += 25
-            elif 45 <= current_rsi <= 55:
-                score += 20
-            elif 65 <= current_rsi <= 75:
-                score += 15
-            if current_volume_ratio > 2.0:
-                score += 25
-            elif current_volume_ratio > 1.5:
-                score += 20
-            elif current_volume_ratio > 1.2:
-                score += 15
-            breakout_strength = (data['close'].iloc[-1] - resistance) / resistance * 100
-            if breakout_strength > 1.5:
-                score += 15
-            elif breakout_strength > 0.8:
-                score += 10
-            score = min(100, score + (consensus * 20))
-            if score < self.min_score:
-                return None
-
-            entry_price = data['close'].iloc[-1]
-            tech_stop = resistance * 0.99
-            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'BUY', atr)
-            stop_loss = min(tech_stop, atr_stop)
-
-            take_profit = self.calculate_dynamic_take_profit(entry_price, 'BUY', atr, self.risk_reward)
-            risk_reward = (take_profit - entry_price) / (entry_price - stop_loss)
-            if risk_reward < 1.5:
-                return None
-
-            return {
-                'symbol': symbol, 'pattern': 'BREAKOUT', 'direction': 'BUY',
-                'score': int(score), 'rsi': round(float(current_rsi), 1),
-                'volume_ratio': round(current_volume_ratio, 2), 'current_price': entry_price,
-                'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit,
-                'risk_reward': round(risk_reward, 1),
-                'atr': round(atr, 4), 'adx': market_state['adx_value'],
-                'market_state': market_state['trend_strength'],
-                'signal_time': datetime.now(), 'signal_type': 'BUY',
-                'confidence': 'HIGH' if score > 70 else 'MEDIUM',
-                'reason': f"突破阻力{resistance:.4f}，涨幅{breakout_strength:.1f}%，ATR动态止损"
-            }
-        except Exception:
-            return None
-
-# ---------- 3. BREAKOUT_FAIL_SHORT 突破失败做空 ----------
-class BreakoutFailShortChecker(BaseSignalChecker):
-    def __init__(self):
-        super().__init__('BREAKOUT_FAIL_SHORT')
-        self.min_score = self.config.get('min_score', 30)
-
-    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
-        try:
-            if '15m' not in data_dict:
-                return None
-            data = data_dict['15m']
-            if len(data) < 50:
-                return None
-
-            market_state = self.get_market_state(data)
-            if not self.is_market_allowed(market_state, 'SELL'):
-                return None
-
-            atr = self.get_atr(data)
-            if atr is None or atr <= 0:
-                return None
-
-            indicators = self.get_multi_timeframe_indicators({'15m': data})['15m']
-            current_rsi = indicators['rsi']
-            if pd.isna(current_rsi) or current_rsi < self.config.get('min_rsi', 60):
-                return None
-
-            # 突破失败判定：价格未能站稳前高
-            recent_high = data['high'].iloc[-11:-1].max()
-            if data['close'].iloc[-1] > recent_high * 0.995:  # 放宽失败条件
-                return None
-            # 跌破短期支撑
-            support = data['low'].iloc[-11:-1].min()
-            if data['close'].iloc[-1] > support * 1.03:  # 允许更大幅度跌破
-                return None
-
-            current_volume_ratio = indicators['volume_ratio']
-            if pd.isna(current_volume_ratio) or current_volume_ratio < 0.7:
-                return None
-
-            consensus, _ = TechnicalIndicatorsMultiTF.get_multi_timeframe_consensus(
-                self.get_multi_timeframe_indicators(data_dict), 'SELL')
-            if consensus < 0.6:
-                return None
-
-            score = 40
-            if current_rsi > 75:
-                score += 30
-            elif current_rsi > 70:
-                score += 25
-            elif current_rsi > 65:
-                score += 20
-            if current_volume_ratio > 1.2:
-                score += 20
-            elif current_volume_ratio > 1.0:
-                score += 15
-            elif current_volume_ratio > 0.8:
-                score += 10
-            price_change = (data['close'].iloc[-1] - data['close'].iloc[-5]) / data['close'].iloc[-5] * 100
-            if price_change < -1.5:
-                score += 15
-            elif price_change < -0.8:
-                score += 10
-            ma20 = TechnicalIndicatorsMultiTF.calculate_ma(data, 20).iloc[-1]
-            if data['close'].iloc[-1] < ma20:
-                score += 10
-            score = min(100, score + (consensus * 20))
-            if score < self.min_score:
-                return None
-
-            entry_price = data['close'].iloc[-1]
-            tech_stop = recent_high * 1.01
-            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'SELL', atr)
-            stop_loss = max(tech_stop, atr_stop)
-
-            take_profit = self.calculate_dynamic_take_profit(entry_price, 'SELL', atr, self.risk_reward)
-            risk_reward = (entry_price - take_profit) / (stop_loss - entry_price)
-            if risk_reward < 1.5:
-                return None
-
-            return {
-                'symbol': symbol, 'pattern': 'BREAKOUT_FAIL_SHORT', 'direction': 'SELL',
-                'score': int(score), 'rsi': round(float(current_rsi), 1),
-                'volume_ratio': round(current_volume_ratio, 2), 'current_price': entry_price,
-                'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit,
-                'risk_reward': round(risk_reward, 1),
-                'atr': round(atr, 4), 'adx': market_state['adx_value'],
-                'market_state': market_state['trend_strength'],
-                'signal_time': datetime.now(), 'signal_type': 'SELL',
-                'confidence': 'HIGH' if score > 75 else 'MEDIUM',
-                'reason': f"高RSI({current_rsi:.1f}) + 突破失败 + 跌破支撑，ATR动态止损"
-            }
-        except Exception:
-            return None
-
-# ---------- 4. TREND 趋势模式 ----------
-class TrendSignalChecker(BaseSignalChecker):
-    def __init__(self):
-        super().__init__('TREND')
-        self.min_score = self.config.get('min_score', 30)
-
-    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
-        try:
-            if '15m' not in data_dict:
-                return None
-            data = data_dict['15m']
-            if len(data) < 50:
-                return None
-
-            market_state = self.get_market_state(data)
-            if not self.is_market_allowed(market_state, 'BUY'):
-                return None
-
-            atr = self.get_atr(data)
-            if atr is None or atr <= 0:
-                return None
-
-            indicators = self.get_multi_timeframe_indicators({'15m': data})['15m']
-            current_rsi = indicators['rsi']
-            conditions = self.config
-            if pd.isna(current_rsi) or not (conditions.get('min_rsi', 35) <= current_rsi <= conditions.get('max_rsi', 80)):
-                return None
-            current_volume_ratio = indicators['volume_ratio']
-            if pd.isna(current_volume_ratio) or current_volume_ratio < conditions.get('min_volume_ratio', 0.8):
-                return None
-
-            # 多时间框架趋势确认
-            uptrend_count = 0
-            for tf, df in data_dict.items():
-                if len(df) >= 30:
-                    ma20_tf = TechnicalIndicatorsMultiTF.calculate_ma(df, 20).iloc[-1]
-                    ma50_tf = TechnicalIndicatorsMultiTF.calculate_ma(df, 50).iloc[-1]
-                    if df['close'].iloc[-1] > ma20_tf > ma50_tf:
-                        uptrend_count += 1
-            if uptrend_count < max(1, len(data_dict) * 0.5):
-                return None
-
-            consensus, _ = TechnicalIndicatorsMultiTF.get_multi_timeframe_consensus(
-                self.get_multi_timeframe_indicators(data_dict), 'BUY')
-            if consensus < 0.6:
-                return None
-
-            score = 60
-            if 50 <= current_rsi <= 70:
-                score += 20
-            elif 35 <= current_rsi <= 50:
-                score += 15
-            if current_volume_ratio > 1.5:
-                score += 20
-            elif current_volume_ratio > 1.2:
-                score += 15
-            ma20 = indicators['ma20']
-            ma50 = indicators['ma50']
-            trend_strength = (ma20 - ma50) / ma50 * 100
-            if trend_strength > 5:
-                score += 15
-            elif trend_strength > 3:
-                score += 10
-            score = min(100, score + (consensus * 20) + (uptrend_count * 5))
-            if score < self.min_score:
-                return None
-
-            entry_price = data['close'].iloc[-1]
-            tech_stop = ma20 * 0.98
-            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'BUY', atr)
-            stop_loss = min(tech_stop, atr_stop)
-
-            take_profit = self.calculate_dynamic_take_profit(entry_price, 'BUY', atr, self.risk_reward)
-            risk_reward = (take_profit - entry_price) / (entry_price - stop_loss)
-            if risk_reward < 1.5:
-                return None
-
-            return {
-                'symbol': symbol, 'pattern': 'TREND', 'direction': 'BUY',
-                'score': int(score), 'rsi': round(float(current_rsi), 1),
-                'volume_ratio': round(current_volume_ratio, 2), 'current_price': entry_price,
-                'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit,
-                'risk_reward': round(risk_reward, 1),
-                'atr': round(atr, 4), 'adx': market_state['adx_value'],
-                'market_state': market_state['trend_strength'],
-                'signal_time': datetime.now(), 'signal_type': 'BUY',
-                'confidence': 'HIGH' if score > 75 else 'MEDIUM',
-                'reason': f"多周期上升趋势，ADX:{market_state['adx_value']}，ATR动态止损"
-            }
-        except Exception:
-            return None
-
-# ---------- 5. CALLBACK 回调模式 ----------
-class CallbackSignalChecker(BaseSignalChecker):
-    def __init__(self):
-        super().__init__('CALLBACK')
-        self.min_score = self.config.get('min_score', 35)
-
-    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
-        try:
-            if '15m' not in data_dict:
-                return None
-            data = data_dict['15m']
-            if len(data) < 50:
-                return None
-
-            market_state = self.get_market_state(data)
-            if not self.is_market_allowed(market_state, 'BUY'):
-                return None
-
-            atr = self.get_atr(data)
-            if atr is None or atr <= 0:
-                return None
-
-            indicators = self.get_multi_timeframe_indicators({'15m': data})['15m']
-            current_rsi = indicators['rsi']
-            if pd.isna(current_rsi) or current_rsi < self.config.get('min_rsi', 50):
-                return None
-
-            # 计算回调幅度
-            recent_high = data['high'].iloc[-30:].max()
-            current_price = data['close'].iloc[-1]
-            callback_pct = ((recent_high - current_price) / recent_high) * 100
-            callback_range = self.config.get('callback_range', {'min': 3, 'max': 20})
-            if not (callback_range['min'] <= callback_pct <= callback_range['max']):
-                return None
-
-            ma20 = indicators['ma20']
-            if current_price < ma20 * 0.95:
-                return None
-
-            consensus, _ = TechnicalIndicatorsMultiTF.get_multi_timeframe_consensus(
-                self.get_multi_timeframe_indicators(data_dict), 'BUY')
-            if consensus < 0.6:
-                return None
-
-            score = 50
-            if 60 <= current_rsi <= 70:
-                score += 20
-            elif current_rsi > 70:
-                score += 15
-            if 8 <= callback_pct <= 12:
-                score += 25
-            elif 5 <= callback_pct <= 15:
-                score += 20
-            volume_ratio = indicators['volume_ratio']
-            if volume_ratio > 0.8:
-                score += 15
-            if current_price > ma20:
-                score += 20
-            score = min(100, score + (consensus * 20))
-            if score < self.min_score:
-                return None
-
-            entry_price = current_price
-            recent_low = data['low'].iloc[-20:].min()
-            tech_stop = recent_low * 0.995
-            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'BUY', atr)
-            stop_loss = min(tech_stop, atr_stop)
-
-            take_profit = self.calculate_dynamic_take_profit(entry_price, 'BUY', atr, self.risk_reward)
-            risk_reward = (take_profit - entry_price) / (entry_price - stop_loss)
-            if risk_reward < 1.5:
-                return None
-
-            return {
-                'symbol': symbol, 'pattern': 'CALLBACK', 'direction': 'BUY',
-                'score': int(score), 'rsi': round(float(current_rsi), 1),
-                'callback_pct': round(callback_pct, 1), 'current_price': entry_price,
-                'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit': take_profit,
-                'risk_reward': round(risk_reward, 1),
-                'volume_ratio': round(volume_ratio, 2),
-                'atr': round(atr, 4), 'adx': market_state['adx_value'],
-                'market_state': market_state['trend_strength'],
-                'signal_time': datetime.now(), 'signal_type': 'BUY',
-                'confidence': 'HIGH' if score > 75 else 'MEDIUM',
-                'reason': f"回调至{callback_pct:.1f}%，RSI:{current_rsi:.1f}，ATR动态止损"
-            }
-        except Exception:
-            return None
-
-# ---------- 6. BOUNCE_FAIL_SHORT 反弹失败做空 ----------
-class BounceFailShortChecker(BaseSignalChecker):
-    def __init__(self):
-        super().__init__('BOUNCE_FAIL_SHORT')
-        self.min_score = self.config.get('min_score', 40)
-
-    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
-        try:
-            if '15m' not in data_dict:
-                return None
-            data = data_dict['15m']
-            if len(data) < 50:
-                return None
-
-            market_state = self.get_market_state(data)
-            if not self.is_market_allowed(market_state, 'SELL'):
-                return None
-
-            atr = self.get_atr(data)
-            if atr is None or atr <= 0:
-                return None
-
-            indicators = self.get_multi_timeframe_indicators({'15m': data})['15m']
-            current_rsi = indicators['rsi']
-            rsi_history = TechnicalIndicatorsMultiTF.calculate_rsi(data, 14)
-            rsi_below_30 = rsi_history < 30
-            if not rsi_below_30.any():
-                return None
-            last_rsi_below_30_idx = None
-            for i in range(len(rsi_history) - 1, -1, -1):
-                if rsi_below_30.iloc[i]:
-                    last_rsi_below_30_idx = i
-                    break
-            if last_rsi_below_30_idx is None or len(data) - last_rsi_below_30_idx > self.config.get('lookback_periods', 10):
-                return None
-
-            low_price = data['low'].iloc[last_rsi_below_30_idx]
-            high_after_low = data['high'].iloc[last_rsi_below_30_idx:].max()
-            fib_levels = TechnicalIndicatorsMultiTF.calculate_fibonacci_levels(high_after_low, low_price)
-            fib_38_2 = fib_levels['38.2%']
-            bounce_pct = (high_after_low - low_price) / low_price * 100
-            max_bounce = self.config.get('max_bounce_pct', 3.0)
-            condition_a = bounce_pct < max_bounce
-            condition_b = data['close'].iloc[-1] < fib_38_2
-            if not (condition_a or condition_b):
-                return None
-            if data['close'].iloc[-1] > high_after_low * 0.99:
-                return None
-            volume_ratio = indicators['volume_ratio']
-            if volume_ratio > 1.5:
-                return None
-
-            consensus, _ = TechnicalIndicatorsMultiTF.get_multi_timeframe_consensus(
-                self.get_multi_timeframe_indicators(data_dict), 'SELL')
-            if consensus < 0.6:
-                return None
-
-            score = 50
-            if bounce_pct < 1.0:
-                score += 30
-            elif bounce_pct < 1.5:
-                score += 25
-            elif bounce_pct < 2.0:
-                score += 20
-            elif bounce_pct < 3.0:
-                score += 15
-            if current_rsi < 35:
-                score += 20
-            elif current_rsi < 40:
-                score += 15
-            elif current_rsi < 45:
-                score += 10
-            if volume_ratio < 0.7:
-                score += 20
-            elif volume_ratio < 0.9:
-                score += 15
-            elif volume_ratio < 1.1:
-                score += 10
-            distance_to_fib = abs(data['close'].iloc[-1] - fib_38_2) / fib_38_2 * 100
-            if distance_to_fib > 2:
-                score += 15
-            elif distance_to_fib > 1:
-                score += 10
-            if condition_a and condition_b:
-                score += 25
-            elif condition_a or condition_b:
-                score += 15
-            score = min(100, score + (consensus * 30))
-            if score < self.min_score:
-                return None
-
-            entry_price = data['close'].iloc[-1]
-            tech_stop = high_after_low * 1.01
-            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'SELL', atr)
-            stop_loss = max(tech_stop, atr_stop)
-
-            take_profit = self.calculate_dynamic_take_profit(entry_price, 'SELL', atr, self.risk_reward)
-            risk_reward = (entry_price - take_profit) / (stop_loss - entry_price)
-            if risk_reward < 1.5:
-                return None
-
-            return {
-                'symbol': symbol, 'pattern': 'BOUNCE_FAIL_SHORT', 'direction': 'SELL',
-                'score': int(score), 'rsi': round(float(current_rsi), 1),
-                'volume_ratio': round(volume_ratio, 2), 'bounce_pct': round(bounce_pct, 2),
-                'current_price': entry_price, 'entry_price': entry_price,
-                'stop_loss': stop_loss, 'take_profit': take_profit,
-                'risk_reward': round(risk_reward, 1),
-                'atr': round(atr, 4), 'adx': market_state['adx_value'],
-                'market_state': market_state['trend_strength'],
-                'signal_time': datetime.now(), 'signal_type': 'SELL',
-                'confidence': 'HIGH' if score > 75 else 'MEDIUM',
-                'reason': f"反弹乏力({bounce_pct:.1f}%) + 未触38.2%回撤，ATR动态止损"
-            }
-        except Exception:
-            return None
-
-# ---------- 7. TREND_EXHAUSTION 趋势衰竭做空 ----------
-class TrendExhaustionShortChecker(BaseSignalChecker):
-    def __init__(self):
-        super().__init__('TREND_EXHAUSTION')
-        self.min_score = self.config.get('min_score', 50)
-
-    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
-        try:
-            if '15m' not in data_dict or '1H' not in data_dict:
-                return None
-            data_15m = data_dict['15m']
-            data_1h = data_dict['1H']
-            if len(data_15m) < 50 or len(data_1h) < 30:
-                return None
-
-            market_state = self.get_market_state(data_15m)
-            if not self.is_market_allowed(market_state, 'SELL'):
-                return None
-
-            atr = self.get_atr(data_15m)
-            if atr is None or atr <= 0:
-                return None
-
-            current_price = data_15m['close'].iloc[-1]
-            price_30_periods_ago = data_15m['close'].iloc[-30]
-            price_increase = (current_price - price_30_periods_ago) / price_30_periods_ago * 100
-            if price_increase < 10:  # 放宽涨幅要求
-                return None
-
-            conditions = self.config
-            confirmation_signals = 0
-            exhaustion_signals = []
-
-            # 信号1：RSI顶背离
-            rsi_15m = TechnicalIndicatorsMultiTF.calculate_rsi(data_15m, 14)
-            recent_high_idx = data_15m['high'].iloc[-20:].idxmax()
-            recent_rsi_high = rsi_15m.loc[recent_high_idx]
-            current_rsi = rsi_15m.iloc[-1]
-            if current_price > data_15m['high'].loc[recent_high_idx] and current_rsi < recent_rsi_high:
-                confirmation_signals += 1
-                exhaustion_signals.append("RSI顶背离")
-
-            # 信号2：成交量递减
-            volume_ma10 = data_15m['volume'].rolling(window=10).mean()
-            volume_ma20 = data_15m['volume'].rolling(window=20).mean()
-            if volume_ma10.iloc[-1] < volume_ma20.iloc[-1] * 0.8:
-                confirmation_signals += 1
-                exhaustion_signals.append("成交量递减")
-
-            # 信号3：涨幅递减
-            recent_highs = data_15m['high'].iloc[-30:].values
-            highs_increase = []
-            for i in range(1, len(recent_highs)):
-                if recent_highs[i] > recent_highs[i-1]:
-                    increase = (recent_highs[i] - recent_highs[i-1]) / recent_highs[i-1] * 100
-                    highs_increase.append(increase)
-            if len(highs_increase) >= 3:
-                last_3_increases = highs_increase[-3:]
-                if last_3_increases[2] < last_3_increases[1] < last_3_increases[0]:
-                    confirmation_signals += 1
-                    exhaustion_signals.append("涨幅递减")
-
-            # 信号4：MACD背离
-            macd_diff = TechnicalIndicatorsMultiTF.calculate_macd(data_15m)
-            if len(macd_diff) > 10:
-                recent_macd_high_idx = macd_diff.iloc[-20:].idxmax()
-                recent_price_high_idx = data_15m['high'].iloc[-20:].idxmax()
-                if (current_price > data_15m['high'].loc[recent_price_high_idx] and
-                    macd_diff.iloc[-1] < macd_diff.loc[recent_macd_high_idx]):
-                    confirmation_signals += 1
-                    exhaustion_signals.append("MACD背离")
-
-            # 信号5：长上影线
-            recent_kline = data_15m.iloc[-1]
-            if (recent_kline['high'] - max(recent_kline['open'], recent_kline['close'])) > (
-                abs(recent_kline['close'] - recent_kline['open']) * 1.5):
-                confirmation_signals += 1
-                exhaustion_signals.append("长上影线")
-
-            # 1H周期超买
-            rsi_1h = TechnicalIndicatorsMultiTF.calculate_rsi(data_1h, 14)
-            if rsi_1h.iloc[-1] > 70:
-                confirmation_signals += 1
-                exhaustion_signals.append("1H周期超买")
-
-            if confirmation_signals < conditions.get('required_confirmation', 2):
-                return None
-
-            score = 40 + (confirmation_signals * 15)
-            if score < self.min_score:
-                return None
-
-            entry_price = current_price
-            recent_high = data_15m['high'].iloc[-20:].max()
-            tech_stop = recent_high * 1.01
-            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'SELL', atr)
-            stop_loss = max(tech_stop, atr_stop)
-
-            take_profit = self.calculate_dynamic_take_profit(entry_price, 'SELL', atr, self.risk_reward)
-            risk_reward = (entry_price - take_profit) / (stop_loss - entry_price)
-            if risk_reward < 1.8:
-                return None
-
-            return {
-                'symbol': symbol, 'pattern': 'TREND_EXHAUSTION', 'direction': 'SELL',
-                'rsi': round(float(current_rsi), 1), 'price_increase': round(price_increase, 1),
-                'confirmation_signals': confirmation_signals, 'exhaustion_signals': exhaustion_signals,
-                'score': int(score), 'current_price': entry_price, 'entry_price': entry_price,
-                'stop_loss': stop_loss, 'take_profit': take_profit, 'risk_reward': round(risk_reward, 1),
-                'atr': round(atr, 4), 'adx': market_state['adx_value'],
-                'market_state': market_state['trend_strength'],
-                'signal_time': datetime.now(), 'signal_type': 'SELL',
-                'confidence': 'HIGH' if score > 75 else 'MEDIUM',
-                'reason': f"趋势衰竭({confirmation_signals}个确认信号): {', '.join(exhaustion_signals)}，ATR动态止损"
-            }
-        except Exception:
-            return None
-
-# ---------- 8. BOUNCE_FAIL_CONFIRM_K 反弹失败·确认K做空 ----------
-class BounceFailConfirmKShortChecker(BaseSignalChecker):
-    def __init__(self):
-        super().__init__('BOUNCE_FAIL_CONFIRM_K')
-        self.kline_analyzer = KLineAnalyzer()
-        self.min_score = self.config.get('min_score', 40)
-
-    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
-        try:
-            if '15m' not in data_dict:
-                return None
-            data_15m = data_dict['15m']
-            if len(data_15m) < 50:
-                return None
-
-            market_state = self.get_market_state(data_15m)
-            if not self.is_market_allowed(market_state, 'SELL'):
-                return None
-
-            atr = self.get_atr(data_15m)
-            if atr is None or atr <= 0:
-                return None
-
-            bounce_structure = self._identify_bounce_structure(data_15m)
-            if not bounce_structure:
-                return None
-            if not self._check_bounce_failure(data_15m, bounce_structure):
-                return None
-            current_kline = data_15m.iloc[-1]
-            kline_analysis = self.kline_analyzer.analyze_candle(current_kline)
-            if not kline_analysis or kline_analysis['is_bullish']:
-                return None
-            if not self.kline_analyzer.is_confirmation_candle(kline_analysis, 'SELL', self.config):
-                return None
-            if not self._is_first_confirmation_k(data_15m, bounce_structure):
-                return None
-            if not self._check_volume_confirmation(data_15m):
-                return None
-            indicators_ok, indicators_info = self._check_technical_indicators(data_15m)
-            if not indicators_ok:
-                return None
-
-            score = self._calculate_signal_score(data_15m, bounce_structure, kline_analysis, indicators_info)
-            if score < self.min_score:
-                return None
-
-            entry_price = kline_analysis['close']
-            tech_stop = bounce_structure['bounce_high'] * 1.01
-            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'SELL', atr)
-            stop_loss = max(tech_stop, atr_stop)
-
-            take_profit = self.calculate_dynamic_take_profit(entry_price, 'SELL', atr, self.risk_reward)
-            risk_reward = (entry_price - take_profit) / (stop_loss - entry_price)
-            if risk_reward < 1.5:
-                return None
-
-            return {
-                'symbol': symbol, 'pattern': 'BOUNCE_FAIL_CONFIRM_K', 'direction': 'SELL',
-                'score': int(score), 'current_price': entry_price, 'entry_price': entry_price,
-                'stop_loss': stop_loss, 'take_profit': take_profit, 'risk_reward': round(risk_reward, 2),
-                'rsi': indicators_info.get('rsi', 50), 'volume_ratio': indicators_info.get('volume_ratio', 1),
-                'atr': round(atr, 4), 'adx': market_state['adx_value'],
-                'market_state': market_state['trend_strength'],
-                'confirmation_k_info': {
-                    'is_bullish': kline_analysis['is_bullish'],
-                    'entity_ratio': round(kline_analysis['entity_ratio'], 2),
-                    'lower_shadow_ratio': round(kline_analysis['lower_shadow_ratio'], 2),
-                    'body_size': round(kline_analysis['body_size'], 4)
-                },
-                'is_first_confirmation_k': True, 'signal_time': datetime.now(),
-                'signal_type': 'SELL', 'confidence': 'HIGH' if score > 70 else 'MEDIUM',
-                'reason': f"反弹失败确认K做空 | 反弹幅度:{bounce_structure['bounce_pct']:.1f}% | 确认K实体:{kline_analysis['entity_ratio']:.0%} | ATR动态止损"
-            }
-        except Exception:
-            return None
-
-    def _identify_bounce_structure(self, data: pd.DataFrame) -> Dict:
-        if len(data) < 30:
-            return None
-        recent_low_idx = data['low'].iloc[-30:].idxmin()
-        recent_low = data['low'].loc[recent_low_idx]
-        after_low_data = data.loc[recent_low_idx:]
-        if len(after_low_data) < 3:
-            return None
-        bounce_high_idx = after_low_data['high'].idxmax()
-        bounce_high = after_low_data['high'].loc[bounce_high_idx]
-        bounce_pct = (bounce_high - recent_low) / recent_low * 100
-        if bounce_pct < 1.0:
-            return None
-        fib_levels = TechnicalIndicatorsMultiTF.calculate_fibonacci_levels(bounce_high, recent_low)
-        return {
-            'bounce_low': recent_low, 'bounce_high': bounce_high, 'bounce_pct': bounce_pct,
-            'fib_levels': fib_levels,
-            'bounce_peak_index': data.index.get_loc(bounce_high_idx)
-        }
-
-    def _check_bounce_failure(self, data: pd.DataFrame, bounce_structure: Dict) -> bool:
-        current_price = data['close'].iloc[-1]
-        bounce_high = bounce_structure['bounce_high']
-        fib_38_2 = bounce_structure['fib_levels']['38.2%']
-        if current_price > bounce_high * 0.99:
-            return False
-        if current_price > fib_38_2:
-            return False
-        if bounce_structure['bounce_pct'] > 10:  # 放宽反弹幅度上限
-            return False
-        return True
-
-    def _is_first_confirmation_k(self, data: pd.DataFrame, bounce_structure: Dict) -> bool:
-        bounce_peak_idx = bounce_structure['bounce_peak_index']
-        current_idx = len(data) - 1
-        bearish_count = 0
-        for i in range(bounce_peak_idx + 1, current_idx + 1):
-            if i >= len(data):
-                break
-            kline = data.iloc[i]
-            kline_analysis = self.kline_analyzer.analyze_candle(kline)
-            if not kline_analysis:
-                continue
-            if kline_analysis['is_bullish']:
-                bearish_count = 0
-            else:
-                bearish_count += 1
-                if kline_analysis['entity_ratio'] >= self.config.get('min_entity_ratio', 0.5):
-                    if i == current_idx and bearish_count == 1:
-                        return True
-        return False
-
-    def _check_volume_confirmation(self, data: pd.DataFrame) -> bool:
-        if len(data) < 20:
-            return False
-        current_volume = data['volume'].iloc[-1]
-        avg_volume = data['volume'].rolling(window=20).mean().iloc[-1]
-        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
-        return volume_ratio >= 0.5
-
-    def _check_technical_indicators(self, data: pd.DataFrame) -> Tuple[bool, Dict]:
-        info = {}
-        rsi = TechnicalIndicatorsMultiTF.calculate_rsi(data, 14)
-        current_rsi = rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50
-        info['rsi'] = round(current_rsi, 1)
-        if current_rsi < 30:  # 放宽RSI下限
-            return False, info
-        volume_ratio = TechnicalIndicatorsMultiTF.calculate_volume_ratio(data, 20)
-        current_volume_ratio = volume_ratio.iloc[-1] if not pd.isna(volume_ratio.iloc[-1]) else 1
-        info['volume_ratio'] = round(current_volume_ratio, 2)
-        ma20 = TechnicalIndicatorsMultiTF.calculate_ma(data, 20).iloc[-1]
-        if data['close'].iloc[-1] > ma20 * 1.08:  # 放宽均线压制条件
-            return False, info
-        return True, info
-
-    def _calculate_signal_score(self, data: pd.DataFrame, bounce_structure: Dict,
-                               kline_analysis: Dict, indicators_info: Dict) -> int:
-        score = 50
-        bounce_pct = bounce_structure['bounce_pct']
-        if bounce_pct < 2.0:
-            score += 20
-        elif bounce_pct < 3.0:
-            score += 15
-        elif bounce_pct < 4.0:
-            score += 10
-        entity_ratio = kline_analysis['entity_ratio']
-        if entity_ratio > 0.8:
-            score += 20
-        elif entity_ratio > 0.7:
-            score += 15
-        elif entity_ratio > 0.6:
-            score += 10
-        elif entity_ratio > 0.5:
-            score += 5
-        rsi = indicators_info.get('rsi', 50)
-        if rsi > 60:
-            score += 15
-        elif rsi > 55:
-            score += 10
-        volume_ratio = indicators_info.get('volume_ratio', 1)
-        if volume_ratio > 1.2:
-            score += 10
-        elif volume_ratio > 0.8:
-            score += 5
-        return min(score, 100)
-
-# ---------- 9. CALLBACK_CONFIRM_K 回调企稳·确认K做多 ----------
-class CallbackConfirmKBuyChecker(BaseSignalChecker):
-    def __init__(self):
-        super().__init__('CALLBACK_CONFIRM_K')
-        self.kline_analyzer = KLineAnalyzer()
-        self.min_score = self.config.get('min_score', 40)
-
-    def check_coin_multi_tf(self, symbol: str, data_dict: Dict[str, pd.DataFrame]) -> Optional[Dict]:
-        try:
-            if '15m' not in data_dict:
-                return None
-            data_15m = data_dict['15m']
-            if len(data_15m) < 50:
-                return None
-
-            market_state = self.get_market_state(data_15m)
-            if not self.is_market_allowed(market_state, 'BUY'):
-                return None
-
-            atr = self.get_atr(data_15m)
-            if atr is None or atr <= 0:
-                return None
-
-            callback_structure = self._identify_callback_structure(data_15m)
-            if not callback_structure:
-                return None
-            if not self._check_callback_stabilization(data_15m, callback_structure):
-                return None
-            current_kline = data_15m.iloc[-1]
-            kline_analysis = self.kline_analyzer.analyze_candle(current_kline)
-            if not kline_analysis or not kline_analysis['is_bullish']:
-                return None
-            if not self.kline_analyzer.is_confirmation_candle(kline_analysis, 'BUY', self.config):
-                return None
-            if not self._is_first_confirmation_k(data_15m, callback_structure):
-                return None
-            if not self._check_volume_confirmation(data_15m):
-                return None
-            indicators_ok, indicators_info = self._check_technical_indicators(data_15m)
-            if not indicators_ok:
-                return None
-
-            score = self._calculate_signal_score(data_15m, callback_structure, kline_analysis, indicators_info)
-            if score < self.min_score:
-                return None
-
-            entry_price = kline_analysis['close']
-            tech_stop = callback_structure['callback_low'] * 0.995
-            atr_stop = self.calculate_dynamic_stop_loss(entry_price, 'BUY', atr)
-            stop_loss = min(tech_stop, atr_stop)
-
-            take_profit = self.calculate_dynamic_take_profit(entry_price, 'BUY', atr, self.risk_reward)
-            risk_reward = (take_profit - entry_price) / (entry_price - stop_loss)
-            if risk_reward < 1.5:
-                return None
-
-            return {
-                'symbol': symbol, 'pattern': 'CALLBACK_CONFIRM_K', 'direction': 'BUY',
-                'score': int(score), 'current_price': entry_price, 'entry_price': entry_price,
-                'stop_loss': stop_loss, 'take_profit': take_profit, 'risk_reward': round(risk_reward, 2),
-                'rsi': indicators_info.get('rsi', 50), 'volume_ratio': indicators_info.get('volume_ratio', 1),
-                'atr': round(atr, 4), 'adx': market_state['adx_value'],
-                'market_state': market_state['trend_strength'],
-                'confirmation_k_info': {
-                    'is_bullish': kline_analysis['is_bullish'],
-                    'entity_ratio': round(kline_analysis['entity_ratio'], 2),
-                    'upper_shadow_ratio': round(kline_analysis['upper_shadow_ratio'], 2),
-                    'body_size': round(kline_analysis['body_size'], 4)
-                },
-                'is_first_confirmation_k': True, 'signal_time': datetime.now(),
-                'signal_type': 'BUY', 'confidence': 'HIGH' if score > 70 else 'MEDIUM',
-                'reason': f"回调企稳确认K做多 | 回调幅度:{callback_structure['callback_pct']:.1f}% | 确认K实体:{kline_analysis['entity_ratio']:.0%} | ATR动态止损"
-            }
-        except Exception:
-            return None
-
-    def _identify_callback_structure(self, data: pd.DataFrame) -> Dict:
-        if len(data) < 30:
-            return None
-        recent_high_idx = data['high'].iloc[-30:].idxmax()
-        recent_high = data['high'].loc[recent_high_idx]
-        after_high_data = data.loc[recent_high_idx:]
-        if len(after_high_data) < 3:
-            return None
-        callback_low_idx = after_high_data['low'].idxmin()
-        callback_low = after_high_data['low'].loc[callback_low_idx]
-        callback_pct = (recent_high - callback_low) / recent_high * 100
-        if callback_pct < 2.0:  # 放宽回调幅度下限
-            return None
-        fib_levels = TechnicalIndicatorsMultiTF.calculate_fibonacci_levels(recent_high, callback_low)
-        return {
-            'callback_high': recent_high, 'callback_low': callback_low, 'callback_pct': callback_pct,
-            'fib_levels': fib_levels,
-            'callback_low_index': data.index.get_loc(callback_low_idx)
-        }
-
-    def _check_callback_stabilization(self, data: pd.DataFrame, callback_structure: Dict) -> bool:
-        current_price = data['close'].iloc[-1]
-        callback_low = callback_structure['callback_low']
-        if current_price < callback_low * 0.99:  # 放宽企稳条件
-            return False
-        fib_61_8 = callback_structure['fib_levels']['61.8%']
-        if current_price < fib_61_8 * 0.98:  # 放宽斐波那契条件
-            return False
-        callback_pct = callback_structure['callback_pct']
-        if callback_pct < 3 or callback_pct > 25:  # 放宽回调范围
-            return False
-        return True
-
-    def _is_first_confirmation_k(self, data: pd.DataFrame, callback_structure: Dict) -> bool:
-        callback_low_idx = callback_structure['callback_low_index']
-        current_idx = len(data) - 1
-        bullish_count = 0
-        for i in range(callback_low_idx + 1, current_idx + 1):
-            if i >= len(data):
-                break
-            kline = data.iloc[i]
-            kline_analysis = self.kline_analyzer.analyze_candle(kline)
-            if not kline_analysis:
-                continue
-            if not kline_analysis['is_bullish']:
-                bullish_count = 0
-            else:
-                bullish_count += 1
-                if kline_analysis['entity_ratio'] >= self.config.get('min_entity_ratio', 0.5):
-                    if i == current_idx and bullish_count == 1:
-                        return True
-        return False
-
-    def _check_volume_confirmation(self, data: pd.DataFrame) -> bool:
-        if len(data) < 20:
-            return False
-        current_volume = data['volume'].iloc[-1]
-        avg_volume = data['volume'].rolling(window=20).mean().iloc[-1]
-        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
-        return volume_ratio >= 0.6  # 放宽成交量要求
-
-    def _check_technical_indicators(self, data: pd.DataFrame) -> Tuple[bool, Dict]:
-        info = {}
-        rsi = TechnicalIndicatorsMultiTF.calculate_rsi(data, 14)
-        current_rsi = rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50
-        info['rsi'] = round(current_rsi, 1)
-        if current_rsi > 75:  # 放宽RSI上限
-            return False, info
-        volume_ratio = TechnicalIndicatorsMultiTF.calculate_volume_ratio(data, 20)
-        current_volume_ratio = volume_ratio.iloc[-1] if not pd.isna(volume_ratio.iloc[-1]) else 1
-        info['volume_ratio'] = round(current_volume_ratio, 2)
-        ma20 = TechnicalIndicatorsMultiTF.calculate_ma(data, 20).iloc[-1]
-        if data['close'].iloc[-1] < ma20 * 0.93:  # 放宽均线支撑条件
-            return False, info
-        return True, info
-
-    def _calculate_signal_score(self, data: pd.DataFrame, callback_structure: Dict,
-                               kline_analysis: Dict, indicators_info: Dict) -> int:
-        score = 50
-        callback_pct = callback_structure['callback_pct']
-        if 5 <= callback_pct <= 10:
-            score += 20
-        elif 10 < callback_pct <= 15:
-            score += 15
-        elif 3 <= callback_pct <= 20:
-            score += 10
-        entity_ratio = kline_analysis['entity_ratio']
-        if entity_ratio > 0.8:
-            score += 20
-        elif entity_ratio > 0.7:
-            score += 15
-        elif entity_ratio > 0.6:
-            score += 10
-        elif entity_ratio > 0.5:
-            score += 5
-        rsi = indicators_info.get('rsi', 50)
-        if rsi < 40:
-            score += 15
-        elif rsi < 45:
-            score += 10
-        volume_ratio = indicators_info.get('volume_ratio', 1)
-        if volume_ratio > 1.5:
-            score += 15
-        elif volume_ratio > 1.2:
-            score += 10
-        return min(score, 100)
-
-# ============ 回测引擎 ============
-class BacktestEngine:
-    def __init__(self, config: Dict, data_fetcher: OKXDataFetcher):
-        self.config = config
-        self.data_fetcher = data_fetcher
-        self.signal_checkers = self._init_checkers()
-
-    def _init_checkers(self):
-        checkers = {}
-        for mode in UltimateConfig.MARKET_MODES:
-            if UltimateConfig.MARKET_MODES[mode]['enabled']:
-                try:
-                    if mode == 'BOUNCE':
-                        checkers[mode] = BounceSignalChecker()
-                    elif mode == 'BREAKOUT':
-                        checkers[mode] = BreakoutSignalChecker()
-                    elif mode == 'BREAKOUT_FAIL_SHORT':
-                        checkers[mode] = BreakoutFailShortChecker()
-                    elif mode == 'TREND':
-                        checkers[mode] = TrendSignalChecker()
-                    elif mode == 'CALLBACK':
-                        checkers[mode] = CallbackSignalChecker()
-                    elif mode == 'BOUNCE_FAIL_SHORT':
-                        checkers[mode] = BounceFailShortChecker()
-                    elif mode == 'TREND_EXHAUSTION':
-                        checkers[mode] = TrendExhaustionShortChecker()
-                    elif mode == 'BOUNCE_FAIL_CONFIRM_K':
-                        checkers[mode] = BounceFailConfirmKShortChecker()
-                    elif mode == 'CALLBACK_CONFIRM_K':
-                        checkers[mode] = CallbackConfirmKBuyChecker()
-                except Exception as e:
-                    print(f"⚠️ 回测加载策略 {mode} 失败: {e}")
-        return checkers
-
-    def run(self):
-        print("\n" + "="*70)
-        print("🚀 开始回测 (最长2星期)")
-        print(f"📅 时间范围: {self.config['start_date']} 至 {self.config['end_date']}")
-        print(f"📊 回测币种: {', '.join(self.config['symbols'])}")
-        print(f"💵 初始资金: ${self.config['initial_capital']:,.2f}")
-        print(f"💸 手续费: {self.config['commission']*100:.2f}% | 滑点: {self.config['slippage']*100:.2f}%")
-        print("="*70)
-
-        total_pnl = 0
-        total_trades = 0
-        winning_trades = 0
-        equity = self.config['initial_capital']
-        trades = []
-
-        for symbol in self.config['symbols']:
-            print(f"\n🔍 回测 {symbol} ...")
-            df = self.data_fetcher.get_historical_candles(
-                symbol, self.config['interval'],
-                self.config['start_date'], self.config['end_date']
-            )
-            if df is None or len(df) < 50:
-                print(f"⚠️ {symbol} 数据不足，跳过")
-                continue
-
-            for i in range(50, len(df)):
-                current_data = df.iloc[:i+1]
-                data_dict = {self.config['interval']: current_data}
-                for name, checker in self.signal_checkers.items():
-                    signal = checker.check_coin_multi_tf(symbol, data_dict)
-                    if signal:
-                        entry_price = signal['entry_price']
-                        stop_loss = signal['stop_loss']
-                        take_profit = signal['take_profit']
-                        direction = signal['direction']
-
-                        commission = self.config['commission']
-                        slippage = self.config['slippage']
-                        if direction == 'BUY':
-                            exec_price = entry_price * (1 + slippage)
-                        else:
-                            exec_price = entry_price * (1 - slippage)
-
-                        exit_price = None
-                        exit_reason = None
-                        for j in range(i+1, len(df)):
-                            bar = df.iloc[j]
-                            if direction == 'BUY':
-                                if bar['low'] <= stop_loss:
-                                    exit_price = stop_loss * (1 - slippage)
-                                    exit_reason = 'STOP_LOSS'
-                                    break
-                                elif bar['high'] >= take_profit:
-                                    exit_price = take_profit * (1 + slippage)
-                                    exit_reason = 'TAKE_PROFIT'
-                                    break
-                            else:
-                                if bar['high'] >= stop_loss:
-                                    exit_price = stop_loss * (1 + slippage)
-                                    exit_reason = 'STOP_LOSS'
-                                    break
-                                elif bar['low'] <= take_profit:
-                                    exit_price = take_profit * (1 - slippage)
-                                    exit_reason = 'TAKE_PROFIT'
-                                    break
-
-                        if exit_price is None:
-                            last_close = df['close'].iloc[-1]
-                            if direction == 'BUY':
-                                exit_price = last_close * (1 - slippage)
-                            else:
-                                exit_price = last_close * (1 + slippage)
-                            exit_reason = 'EXPIRED'
-
-                        if direction == 'BUY':
-                            pnl = (exit_price - exec_price) * (1 - commission)
-                        else:
-                            pnl = (exec_price - exit_price) * (1 - commission)
-
-                        equity += pnl
-                        total_pnl += pnl
-                        total_trades += 1
-                        if pnl > 0:
-                            winning_trades += 1
-
-                        trades.append({
-                            'time': df.index[i],
-                            'symbol': symbol,
-                            'direction': direction,
-                            'entry': exec_price,
-                            'exit': exit_price,
-                            'pnl': pnl,
-                            'reason': exit_reason
-                        })
-
-                        print(f"   {df.index[i].strftime('%m-%d %H:%M')} {symbol} {direction} "
-                              f"入场:{exec_price:.4f} 离场:{exit_price:.4f} "
-                              f"盈亏:${pnl:.2f} ({exit_reason})")
-
-        print("\n" + "="*70)
-        print("📊 回测统计")
-        print("="*70)
-        print(f"初始资金: ${self.config['initial_capital']:,.2f}")
-        print(f"最终权益: ${equity:,.2f}")
-        print(f"总盈亏: ${total_pnl:,.2f}  ({total_pnl/self.config['initial_capital']*100:+.2f}%)")
-        print(f"总交易次数: {total_trades}")
-        if total_trades > 0:
-            win_rate = (winning_trades / total_trades) * 100
-            print(f"胜率: {win_rate:.2f}% ({winning_trades}/{total_trades})")
-            avg_pnl = total_pnl / total_trades
-            print(f"平均盈亏: ${avg_pnl:.2f}")
-        print("="*70)
-        return {
-            'total_pnl': total_pnl,
-            'total_trades': total_trades,
-            'win_rate': win_rate if total_trades > 0 else 0,
-            'equity': equity,
-            'trades': trades
-        }
-
-# ============ 主系统 ============
-class UltimateTradingSystem:
-    def __init__(self, telegram_bot_token=None, telegram_chat_id=None):
-        print("🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀")
-        print("🚀 终极智能交易系统 v34.0 宽松参数适配版")
-        print("🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀")
-        self.config = UltimateConfig
-        self.coins = MONITOR_COINS[:self.config.COINS_TO_MONITOR]
-        self.analysis_cycle_count = 0
-        self.no_signal_count = 0
-        self.start_time = datetime.now()
-        self.cooldown_manager = CooldownManager()
-        self.data_fetcher = OKXDataFetcher()
-        self.signal_checkers = {}
-        self.init_signal_checkers()
-        if telegram_bot_token and telegram_chat_id:
-            try:
-                self.telegram = UltimateTelegramNotifier(telegram_bot_token, telegram_chat_id)
-            except Exception as e:
-                print(f"⚠️ Telegram通知器初始化失败: {e}")
-                self.telegram = None
-        else:
-            self.telegram = None
-        self.stats = {
-            'total_signals': 0, 'buy_signals': 0, 'sell_signals': 0,
-            'signals_today': defaultdict(int)
-        }
-        print("\n✅ 系统初始化完成")
-        print("=" * 70)
-
-    def init_signal_checkers(self):
-        print("\n🔄 初始化信号检查器...")
-        checkers_map = {
-            'BOUNCE': BounceSignalChecker,
-            'BREAKOUT': BreakoutSignalChecker,
-            'BREAKOUT_FAIL_SHORT': BreakoutFailShortChecker,
-            'TREND': TrendSignalChecker,
-            'CALLBACK': CallbackSignalChecker,
-            'BOUNCE_FAIL_SHORT': BounceFailShortChecker,
-            'TREND_EXHAUSTION': TrendExhaustionShortChecker,
-            'BOUNCE_FAIL_CONFIRM_K': BounceFailConfirmKShortChecker,
-            'CALLBACK_CONFIRM_K': CallbackConfirmKBuyChecker
-        }
-        for mode, checker_class in checkers_map.items():
-            try:
-                if self.config.MARKET_MODES.get(mode, {}).get('enabled', False):
-                    self.signal_checkers[mode] = checker_class()
-                    print(f"   ✅ {mode}: {checker_class.__name__}")
-                else:
-                    print(f"   ⚠️ {mode}: 已禁用")
-            except Exception as e:
-                print(f"   ❌ {mode}: 初始化失败 - {str(e)}")
-        print(f"✅ 已初始化 {len(self.signal_checkers)} 个信号检查器")
-
-    def get_coins_data(self):
-        print("📊 获取实时市场数据...")
-        return self.data_fetcher.get_all_coins_data(self.coins)
-
-    def run_multi_mode_analysis(self, coins_data):
-        if not coins_data:
-            return []
-        print(f"🔄 运行多模式分析 ({len(coins_data)}个币种)...")
-        all_signals = []
-        for mode, checker in self.signal_checkers.items():
-            print(f"🤖 检查{mode}模式...")
-            mode_signals = []
-            for symbol, data_dict in coins_data.items():
-                direction = 'SELL' if mode in ['BREAKOUT_FAIL_SHORT', 'BOUNCE_FAIL_SHORT',
-                                              'TREND_EXHAUSTION', 'BOUNCE_FAIL_CONFIRM_K'] else 'BUY'
-                cooldown_ok, _ = self.cooldown_manager.check_cooldown(symbol, direction)
-                if not cooldown_ok:
-                    continue
-                signal = checker.check_coin_multi_tf(symbol, data_dict)
-                if signal:
-                    mode_signals.append(signal)
-            if mode_signals:
-                print(f"✅ {mode}模式发现 {len(mode_signals)} 个信号")
-                all_signals.extend(mode_signals)
-            else:
-                print(f"📊 {mode}模式未发现信号")
-        unique = {}
-        for s in all_signals:
-            sym = s['symbol']
-            if sym not in unique or s['score'] > unique[sym]['score']:
-                unique[sym] = s
-        final = list(unique.values())
-        final.sort(key=lambda x: x.get('score', 0), reverse=True)
-        return final[:self.config.MAX_SIGNALS]
-
-    def process_signals(self, signals):
-        if not signals:
-            if self.telegram:
-                try:
-                    no_signal_msg = f"""
-📊 <b>本轮分析结果</b>
-━━━━━━━━━━━━━━━━━━━━
-🔍 分析时间: {datetime.now().strftime('%H:%M:%S')}
-📊 扫描币种: {len(self.coins)}个
-❌ 未发现符合条件的交易信号
-━━━━━━━━━━━━━━━━━━━━
-💡 <i>市场可能没有明显机会，建议观望</i>
-⏰ 下次分析: {self.config.ANALYSIS_INTERVAL}分钟后
-"""
-                    self.telegram.bot.send_message(self.telegram.chat_id, no_signal_msg, parse_mode='HTML')
-                except:
-                    pass
-            return
-        sorted_signals = sorted(signals, key=lambda x: x.get('score', 0), reverse=True)
-        if self.telegram:
-            self.telegram.send_top_3_signals(sorted_signals)
-        for signal in sorted_signals:
-            cooldown_ok, _ = self.cooldown_manager.check_cooldown(
-                signal['symbol'], signal['direction']
-            )
-            if cooldown_ok:
-                self.cooldown_manager.record_signal(
-                    signal['symbol'], signal['direction'],
-                    signal['pattern'], signal['score']
-                )
-                self.stats['total_signals'] += 1
-                if signal['direction'] == 'BUY':
-                    self.stats['buy_signals'] += 1
-                else:
-                    self.stats['sell_signals'] += 1
-                today = datetime.now().strftime('%Y-%m-%d')
-                self.stats['signals_today'][today] += 1
-        print(f"\n✅ 已处理 {len(sorted_signals)} 个信号")
-
-    def run_analysis_cycle_enhanced(self):
-        try:
-            self.analysis_cycle_count += 1
-            print("\n" + "="*70)
-            print(f"🤖 第 {self.analysis_cycle_count} 次智能分析周期 (v{self.config.VERSION})")
-            print("="*70)
-            coins_data = self.get_coins_data()
-            if not coins_data or len(coins_data) < 10:
-                print("❌ 数据获取失败或数据不足，跳过本次分析")
-                return []
-            signals = self.run_multi_mode_analysis(coins_data)
-            if signals:
-                self.process_signals(signals)
-                self.no_signal_count = 0
-            else:
-                print("\n📊 本次分析未发现符合条件的交易信号")
-                self.no_signal_count += 1
-            next_time = datetime.now() + timedelta(minutes=self.config.ANALYSIS_INTERVAL)
-            print(f"\n⏳ 下次分析: {self.config.ANALYSIS_INTERVAL}分钟后 ({next_time.strftime('%H:%M:%S')})")
-            return signals
-        except Exception as e:
-            print(f"\n❌ 分析周期失败: {str(e)}")
-            traceback.print_exc()
-            return []
-
-    def run_single_cycle(self):
-        print("\n🚀 立即运行分析周期...")
-        return self.run_analysis_cycle_enhanced()
-
-    def run_continuous(self):
-        print("\n🚀 系统将在3秒后自动启动连续监控模式...")
-        for i in range(3, 0, -1):
-            print(f"  {i}...")
-            time.sleep(1)
-        print("\n🚀 终极系统开始自动连续运行...")
-        print("💡 按 Ctrl+C 停止\n")
-        self.run_analysis_cycle_enhanced()
-        while True:
-            try:
-                time.sleep(self.config.ANALYSIS_INTERVAL * 60)
-                self.run_analysis_cycle_enhanced()
-            except KeyboardInterrupt:
-                print("\n\n🛑 系统被用户中断")
-                break
-            except Exception as e:
-                print(f"\n❌ 运行出错: {e}")
-                time.sleep(60)
-
 # ============ 主入口 ============
 def main():
     print("="*70)
-    print("🚀 终极智能交易系统 v34.0 宽松参数适配版")
+    print("🚀 终极智能交易系统 v34.0 全策略ATR/ADX适配版")
     print("="*70)
 
-    # 检测是否在 GitHub Actions 环境中运行
-    if os.getenv('GITHUB_ACTIONS') == 'true':
-        print("🔧 检测到 GitHub Actions 环境，将以一次性模式运行")
-        # 创建系统并执行单次分析
-        system = UltimateTradingSystem(
-            telegram_bot_token=TELEGRAM_BOT_TOKEN,
-            telegram_chat_id=TELEGRAM_CHAT_ID
-        )
-        system.run_single_cycle()
-        print("✅ 本次分析完成，退出")
-        return
-
-    # 原有逻辑保持不变
     if UltimateConfig.BACKTEST_CONFIG['enabled']:
         print("\n🔧 回测模式已启用，将运行回测，不发送Telegram通知")
         fetcher = OKXDataFetcher()
@@ -2480,10 +2430,13 @@ def main():
     )
     if system:
         print("\n✅ 系统初始化完成！")
-        print("\n🚀 立即运行首次增强分析周期...")
-        system.run_single_cycle()
-        print("\n🚀 自动启动连续监控模式...")
-        system.run_continuous()
+        if IN_GITHUB_ACTIONS:
+            print("\n🔧 运行在 GitHub Actions 环境，执行单次分析后退出...")
+            system.run_single_cycle()
+            print("✅ 分析完成，退出。")
+        else:
+            print("\n🚀 自动启动连续监控模式...")
+            system.run_continuous()
 
 if __name__ == "__main__":
     main()
