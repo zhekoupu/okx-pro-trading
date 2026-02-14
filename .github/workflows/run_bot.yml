@@ -38,7 +38,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GITHUB_ACTIONS: true  # 用于脚本识别环境
-        run: python trading_bot.py
+        run: python main.py
 
       # 保存冷却状态缓存，供下次运行使用
       - name: 保存冷却状态缓存
