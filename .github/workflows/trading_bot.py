@@ -44,8 +44,7 @@ from typing import Dict, List, Any, Tuple, Optional
 from collections import defaultdict, deque
 
 # ============ 用户配置区 ============
-TELEGRAM_BOT_TOKEN = "8455563588:AAERqF8wtcQUOojByNPPpbb0oJG-7VMpr9s"
-TELEGRAM_CHAT_ID = "2004655568"
+
 OKX_API_BASE_URL = "https://www.okx.com"
 OKX_CANDLE_INTERVAL = ["15m", "1H"]
 OKX_CANDLE_LIMIT = 200
@@ -62,6 +61,10 @@ MONITOR_COINS = [
     'APT', 'SUI', 'SEI', 'INJ', 'FET', 'THETA', 'AR',
     'ENS', 'PEPE', 'SHIB', 'APE', 'LIT', 'GALA', 'IMX', 'AXS'
 ]
+
+# Telegram 配置（优先从环境变量读取，若无则使用默认值）
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', "8455563588:AAERqF8wtcQUOojByNPPpbb0oJG-7VMpr9s")
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', "2004655568")
 
 # ============ 增强的系统配置类（宽松参数版）============
 class UltimateConfig:
@@ -2450,6 +2453,19 @@ def main():
     print("🚀 终极智能交易系统 v34.0 宽松参数适配版")
     print("="*70)
 
+    # 检测是否在 GitHub Actions 环境中运行
+    if os.getenv('GITHUB_ACTIONS') == 'true':
+        print("🔧 检测到 GitHub Actions 环境，将以一次性模式运行")
+        # 创建系统并执行单次分析
+        system = UltimateTradingSystem(
+            telegram_bot_token=TELEGRAM_BOT_TOKEN,
+            telegram_chat_id=TELEGRAM_CHAT_ID
+        )
+        system.run_single_cycle()
+        print("✅ 本次分析完成，退出")
+        return
+
+    # 原有逻辑保持不变
     if UltimateConfig.BACKTEST_CONFIG['enabled']:
         print("\n🔧 回测模式已启用，将运行回测，不发送Telegram通知")
         fetcher = OKXDataFetcher()
