@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v33.6 完整正式版（GitHub Actions 优化版）
+终极智能交易系统 v33.6 完整正式版 (GitHub Actions 适配版)
 功能特性：
 ✅ 1. 趋势衰竭做空检测器
 ✅ 2. HYPE暴涨原因分析器
@@ -9,28 +9,7 @@
 ✅ 4. 反弹失败·确认K做空策略（防追尾）
 ✅ 5. 回调企稳·确认K做多策略（防追尾）
 ✅ 6. 增强Telegram通知：前3个信号详细分析
-✅ 7. GitHub Actions 适配：自动从环境变量读取Telegram配置，单次运行后退出
 """
-
-# ============ 自动安装依赖 ============
-import subprocess
-import sys
-import os
-import atexit
-
-def install_packages():
-    required_packages = ['pandas', 'numpy', 'requests', 'pyTelegramBotAPI']
-    for package in required_packages:
-        try:
-            __import__(package)
-            print(f"✅ {package} 已安装")
-        except ImportError:
-            print(f"🔧 正在安装 {package}...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
-            print(f"✅ {package} 安装完成")
-
-print("🔧 检查并安装依赖...")
-install_packages()
 
 # ============ 导入库 ============
 import pandas as pd
@@ -41,14 +20,22 @@ import traceback
 import requests
 import pickle
 import hashlib
+import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Tuple, Optional
 from collections import defaultdict, deque
 
-# ============ 用户配置区（优先从环境变量读取）============
-# Telegram 配置：如果环境变量不存在，则设为 None（Telegram 通知器会禁用）
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+# ============ 从环境变量读取配置 ============
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    print("⚠️ 警告：未设置 Telegram 环境变量，通知功能将禁用")
+    # 将 Telegram 配置设为禁用
+    TELEGRAM_ENABLED = False
+else:
+    TELEGRAM_ENABLED = True
+
+# ============ OKX API 配置 ============
 OKX_API_BASE_URL = "https://www.okx.com"
 OKX_CANDLE_INTERVAL = ["15m", "1H"]
 OKX_CANDLE_LIMIT = 200
@@ -68,7 +55,7 @@ MONITOR_COINS = [
 
 # ============ 系统配置类 ============
 class UltimateConfig:
-    VERSION = "33.6-正式版-GitHub优化"
+    VERSION = "33.6-完整正式版-GHA"
     ANALYSIS_INTERVAL = 45
     COINS_TO_MONITOR = len(MONITOR_COINS)
     MAX_SIGNALS = 10
@@ -168,7 +155,7 @@ class UltimateConfig:
     }
 
     TELEGRAM_CONFIG = {
-        'enabled': True,  # 将在运行时根据是否有token决定是否启用
+        'enabled': TELEGRAM_ENABLED,
         'parse_mode': 'HTML',
         'show_emoji': True,
         'show_details': True,
@@ -184,6 +171,7 @@ class CooldownManager:
         self.signal_history = defaultdict(list)
         self.cooldown_file = 'cooldown_state.pkl'
         self.load_state()
+        import atexit
         atexit.register(self.save_state)
 
     def load_state(self):
@@ -581,28 +569,18 @@ class KLineAnalyzer:
             return False
         return True
 
-# ============ 改进的Telegram通知器（支持凭证缺失时禁用）============
+# ============ 改进的Telegram通知器 ============
 class UltimateTelegramNotifier:
     def __init__(self, bot_token, chat_id):
-        self.config = UltimateConfig.TELEGRAM_CONFIG.copy()
-        # 如果凭证缺失，直接禁用
-        if not bot_token or not chat_id:
-            print("⚠️ Telegram 凭证未提供，通知器已禁用")
-            self.config['enabled'] = False
-            return
-        try:
-            self.bot = telebot.TeleBot(bot_token)
-            self.chat_id = chat_id
-            self.message_history = deque(maxlen=100)
-            self.test_connection()
-            self.send_startup_message()
-        except Exception as e:
-            print(f"❌ Telegram 初始化失败: {e}")
-            self.config['enabled'] = False
+        self.bot = telebot.TeleBot(bot_token)
+        self.chat_id = chat_id
+        self.config = UltimateConfig.TELEGRAM_CONFIG
+        self.message_history = deque(maxlen=100)
+        self.test_connection()
+        self.send_startup_message()
 
     def send_startup_message(self):
-        if not self.config.get('enabled', False):
-            return
+        """发送系统启动消息"""
         try:
             startup_msg = f"""
 🚀 <b>终极智能交易系统 v{UltimateConfig.VERSION} 已启动！</b>
@@ -618,15 +596,17 @@ class UltimateTelegramNotifier:
 ━━━━━━━━━━━━━━━━━━━━
 <code>系统状态: ✅ 运行中</code>
 """
-            self.bot.send_message(self.chat_id, startup_msg, parse_mode='HTML', disable_web_page_preview=True)
+            self.bot.send_message(
+                self.chat_id,
+                startup_msg,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
             print("✅ 系统启动消息已发送到Telegram")
         except Exception as e:
             print(f"❌ 发送启动消息失败: {e}")
-            self.config['enabled'] = False
 
     def test_connection(self):
-        if not self.config.get('enabled', False):
-            return
         try:
             self.bot.get_me()
             print("✅ Telegram连接测试成功")
@@ -635,6 +615,7 @@ class UltimateTelegramNotifier:
             self.config['enabled'] = False
 
     def format_price(self, price):
+        """格式化价格显示"""
         try:
             if price >= 100:
                 return f"${price:,.2f}"
@@ -654,6 +635,7 @@ class UltimateTelegramNotifier:
             return f"${price}"
 
     def format_percentage(self, value):
+        """格式化百分比"""
         try:
             return f"{value:+.1f}%" if value >= 0 else f"{value:.1f}%"
         except:
@@ -680,13 +662,13 @@ class UltimateTelegramNotifier:
         try:
             rsi_value = float(rsi)
             if rsi_value < 30:
-                return '🟢'
+                return '🟢'  # 超卖
             elif rsi_value > 70:
-                return '🔴'
+                return '🔴'  # 超买
             elif rsi_value > 60:
-                return '🟡'
+                return '🟡'  # 偏高
             else:
-                return '⚪'
+                return '⚪'  # 中性
         except:
             return '⚪'
 
@@ -707,6 +689,7 @@ class UltimateTelegramNotifier:
             return '📊'
 
     def create_detailed_signal_message(self, signal):
+        """创建详细的信号消息"""
         try:
             symbol = signal.get('symbol', 'UNKNOWN')
             pattern = signal.get('pattern', 'UNKNOWN')
@@ -714,16 +697,19 @@ class UltimateTelegramNotifier:
             score = signal.get('score', 0)
             rsi = signal.get('rsi', 0)
 
+            # 获取emoji
             pattern_emoji = self.get_emoji_for_pattern(pattern)
             direction_emoji = self.get_emoji_for_direction(direction)
             score_emoji = self.get_emoji_for_score(score)
             rsi_emoji = self.get_emoji_for_rsi(rsi)
 
+            # 价格格式化
             current_price = self.format_price(signal.get('current_price', 0))
             entry_price = self.format_price(signal.get('entry_price', 0))
             stop_loss = self.format_price(signal.get('stop_loss', 0))
             take_profit = self.format_price(signal.get('take_profit', 0))
 
+            # 计算百分比
             entry = float(signal.get('entry_price', 1))
             sl = float(signal.get('stop_loss', 1))
             tp = float(signal.get('take_profit', 1))
@@ -735,6 +721,7 @@ class UltimateTelegramNotifier:
                 risk_pct = (sl - entry) / entry * 100
                 reward_pct = (entry - tp) / entry * 100
 
+            # 构建消息
             message = f"""
 {pattern_emoji} <b>{symbol}/USDT - {pattern}</b> {direction_emoji}
 ━━━━━━━━━━━━━━━━━━━━
@@ -751,6 +738,7 @@ class UltimateTelegramNotifier:
 
 📈 <b>技术分析:</b>
 """
+            # 添加技术指标
             if 'volume_ratio' in signal:
                 vol_ratio = signal['volume_ratio']
                 vol_emoji = '📈' if vol_ratio > 1.2 else '📊' if vol_ratio > 0.8 else '📉'
@@ -764,6 +752,7 @@ class UltimateTelegramNotifier:
                 bounce_pct = signal['bounce_pct']
                 message += f"├ 反弹幅度: {bounce_pct:.1f}%\n"
 
+            # 添加确认K信息
             if 'confirmation_k_info' in signal:
                 conf_info = signal['confirmation_k_info']
                 if pattern in ['BOUNCE_FAIL_CONFIRM_K', 'CALLBACK_CONFIRM_K']:
@@ -777,6 +766,7 @@ class UltimateTelegramNotifier:
             else:
                 message += "└ 技术指标支持信号\n"
 
+            # 交易理由
             reason = signal.get('reason', '')
             if not reason:
                 if pattern == 'BOUNCE':
@@ -814,10 +804,14 @@ class UltimateTelegramNotifier:
             return f"❌ 生成信号消息失败: {str(e)}"
 
     def send_top_3_signals(self, signals):
-        if not signals or len(signals) == 0 or not self.config.get('enabled', False):
+        """发送前3个详细信号"""
+        if not signals or len(signals) == 0:
             return
+
         try:
             print(f"📤 准备发送前{min(3, len(signals))}个详细信号到Telegram...")
+
+            # 先发送一个标题消息
             header_msg = f"""
 📊 <b>本轮分析发现 {len(signals)} 个交易信号</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -825,19 +819,32 @@ class UltimateTelegramNotifier:
 ⏰ 分析时间: {datetime.now().strftime('%H:%M:%S')}
 ━━━━━━━━━━━━━━━━━━━━
 """
-            self.bot.send_message(self.chat_id, header_msg, parse_mode='HTML', disable_web_page_preview=True)
+            self.bot.send_message(
+                self.chat_id,
+                header_msg,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
             time.sleep(1)
 
+            # 发送前3个信号
             for i, signal in enumerate(signals[:3]):
                 detailed_message = self.create_detailed_signal_message(signal)
+
                 if detailed_message:
                     try:
-                        self.bot.send_message(self.chat_id, detailed_message, parse_mode='HTML', disable_web_page_preview=True)
+                        self.bot.send_message(
+                            self.chat_id,
+                            detailed_message,
+                            parse_mode='HTML',
+                            disable_web_page_preview=True
+                        )
                         print(f"✅ 已发送第{i+1}个信号: {signal.get('symbol')}")
-                        time.sleep(2)
+                        time.sleep(2)  # 避免发送过快被限制
                     except Exception as e:
                         print(f"❌ 发送第{i+1}个信号失败: {e}")
 
+            # 发送总结消息
             summary_msg = f"""
 📈 <b>本轮分析完成</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -847,32 +854,64 @@ class UltimateTelegramNotifier:
 ━━━━━━━━━━━━━━━━━━━━
 💡 <i>温馨提示: 市场有风险，投资需谨慎</i>
 """
-            self.bot.send_message(self.chat_id, summary_msg, parse_mode='HTML', disable_web_page_preview=True)
+            self.bot.send_message(
+                self.chat_id,
+                summary_msg,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+
             print("✅ 前3个详细信号已成功发送到Telegram")
+
         except Exception as e:
             print(f"❌ 发送详细信号失败: {e}")
 
     def send_signal_message(self, signal, cooldown_status: str = ""):
-        if not self.config.get('enabled', False):
-            return
+        """发送单个信号消息（兼容旧代码）"""
         try:
+            if not self.config['enabled']:
+                return
+
             message = self.create_detailed_signal_message(signal)
+
             if cooldown_status:
                 message += f"\n⏳ {cooldown_status}"
-            self.bot.send_message(self.chat_id, message, parse_mode='HTML', disable_web_page_preview=True, disable_notification=False)
-            self.message_history.append({'time': datetime.now(), 'symbol': signal.get('symbol', 'UNKNOWN'), 'pattern': signal.get('pattern', 'UNKNOWN'), 'direction': signal.get('direction', 'BUY')})
+
+            self.bot.send_message(
+                self.chat_id,
+                message,
+                parse_mode='HTML',
+                disable_web_page_preview=True,
+                disable_notification=False
+            )
+
+            self.message_history.append({
+                'time': datetime.now(),
+                'symbol': signal.get('symbol', 'UNKNOWN'),
+                'pattern': signal.get('pattern', 'UNKNOWN'),
+                'direction': signal.get('direction', 'BUY')
+            })
+
             print(f"✅ Telegram信号发送成功: {signal.get('symbol', 'UNKNOWN')}")
+
         except Exception as e:
             print(f"❌ 发送Telegram消息失败: {e}")
 
     def send_batch_summary(self, signals):
-        if not signals or not self.config.get('enabled', False):
+        """发送批量信号总结"""
+        if not signals or not self.config['enabled']:
             return
+
         try:
+            # 按评分排序
             sorted_signals = sorted(signals, key=lambda x: x.get('score', 0), reverse=True)
+
+            # 统计
             total_count = len(signals)
             buy_count = sum(1 for s in signals if s.get('direction') == 'BUY')
             sell_count = total_count - buy_count
+
+            # 创建总结消息
             summary = f"""
 📊 <b>分析周期总结</b>
 <b>发现 {total_count} 个交易信号</b>
@@ -883,6 +922,8 @@ class UltimateTelegramNotifier:
 
 🏆 <b>最佳信号 TOP 5</b>
 """
+
+            # 添加前5个最佳信号
             for i, signal in enumerate(sorted_signals[:5], 1):
                 symbol = signal.get('symbol', 'UNKNOWN')
                 pattern = signal.get('pattern', 'UNKNOWN')
@@ -890,16 +931,26 @@ class UltimateTelegramNotifier:
                 score = signal.get('score', 0)
                 rsi = signal.get('rsi', 0)
                 price = self.format_price(signal.get('current_price', 0))
+
                 direction_emoji = self.get_emoji_for_direction(direction)
                 pattern_emoji = self.get_emoji_for_pattern(pattern)
                 score_emoji = self.get_emoji_for_score(score)
+
                 summary += f"\n{i}. {direction_emoji} <b>{symbol}</b>\n"
                 summary += f"   {pattern_emoji} {pattern} | 评分: {score} {score_emoji}\n"
                 summary += f"   RSI: {rsi:.1f} | 价格: {price}\n"
+
             summary += "\n" + "─" * 30
             summary += f"\n⏰ 下次分析: {UltimateConfig.ANALYSIS_INTERVAL}分钟后"
             summary += f"\n📱 详细信号已单独发送"
-            self.bot.send_message(self.chat_id, summary, parse_mode='HTML', disable_web_page_preview=True)
+
+            # 发送总结
+            self.bot.send_message(
+                self.chat_id,
+                summary,
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
             print("✅ 批量总结发送成功")
         except Exception as e:
             print(f"❌ 发送批量总结失败: {e}")
@@ -2039,7 +2090,7 @@ class UltimateTradingSystem:
         self.hype_analyzer = HypeAnalyzer(self.data_fetcher)
         self.coin_classifier = CoinClassifier()
         print("✅ 新增模块初始化完成")
-        if telegram_bot_token and telegram_chat_id:
+        if telegram_bot_token and telegram_chat_id and UltimateConfig.TELEGRAM_CONFIG['enabled']:
             try:
                 self.telegram = UltimateTelegramNotifier(telegram_bot_token, telegram_chat_id)
                 print("✅ Telegram通知器初始化成功")
@@ -2129,6 +2180,7 @@ class UltimateTradingSystem:
 
     def process_signals(self, signals):
         if not signals:
+            # 如果没有信号，也发送一个通知
             if self.telegram:
                 try:
                     no_signal_msg = f"""
@@ -2141,35 +2193,48 @@ class UltimateTradingSystem:
 💡 <i>市场可能没有明显机会，建议观望</i>
 ⏰ 下次分析: {self.config.ANALYSIS_INTERVAL}分钟后
 """
-                    self.telegram.bot.send_message(self.telegram.chat_id, no_signal_msg, parse_mode='HTML')
+                    self.telegram.bot.send_message(
+                        self.telegram.chat_id,
+                        no_signal_msg,
+                        parse_mode='HTML'
+                    )
                     print("📊 无信号通知已发送到Telegram")
                 except Exception as e:
                     print(f"❌ 发送无信号通知失败: {e}")
             return
 
         print(f"\n🔔 发现 {len(signals)} 个交易信号")
+
+        # 按评分排序
         sorted_signals = sorted(signals, key=lambda x: x.get('score', 0), reverse=True)
 
+        # 发送前3个详细信号
         if self.telegram:
             self.telegram.send_top_3_signals(sorted_signals)
 
+        # 处理所有信号（记录到冷却系统）
         for signal in sorted_signals:
             cooldown_ok, cooldown_reason = self.cooldown_manager.check_cooldown(
                 signal.get('symbol', 'UNKNOWN'),
                 signal.get('direction', 'BUY')
             )
+
             if cooldown_ok:
+                # 记录信号到冷却管理器
                 self.cooldown_manager.record_signal(
                     signal.get('symbol', 'UNKNOWN'),
                     signal.get('direction', 'BUY'),
                     signal.get('pattern', 'UNKNOWN'),
                     signal.get('score', 0)
                 )
+
+                # 更新统计
                 self.stats['total_signals'] += 1
                 if signal.get('direction') == 'BUY':
                     self.stats['buy_signals'] += 1
                 else:
                     self.stats['sell_signals'] += 1
+
                 today_str = datetime.now().strftime('%Y-%m-%d')
                 self.stats['signals_today'][today_str] += 1
 
@@ -2281,39 +2346,42 @@ class UltimateTradingSystem:
                 print(f"\n❌ 运行出错: {e}")
                 time.sleep(60)
 
-# ============ 主程序（优化版，支持 GitHub Actions 一次性运行）============
+# ============ 主程序 ============
 def main():
     print("=" * 70)
-    print("🚀 终极智能交易系统 v33.6 完整正式版（GitHub Actions 优化版）")
+    print("🚀 终极智能交易系统 v33.6 完整正式版")
     print("=" * 70)
-    print("📅 版本: 33.6-正式版-GitHub优化")
+    print("📅 版本: 33.6-完整正式版")
     print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📊 初始监控币种: {len(MONITOR_COINS)}个")
     print("🎯 智能模式: 9种（新增2个确认K策略）")
+    print("✨ 新增对称策略:")
+    print("   1. 反弹失败·确认K做空（防止追尾）")
+    print("   2. 回调企稳·确认K做多（防止追尾）")
     print(f"📈 多周期分析: {', '.join(UltimateConfig.MULTI_TIMEFRAME_CONFIG['timeframes'])}")
     print(f"⏰ 分析间隔: {UltimateConfig.ANALYSIS_INTERVAL}分钟")
     print(f"🧊 冷却机制: 同币种{UltimateConfig.COOLDOWN_CONFIG['same_coin_cooldown']}分钟")
     print(f"📈 数据源: OKX公共API")
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        print(f"🤖 Telegram通知: ✅ 已启用（从环境变量读取）")
-    else:
-        print(f"🤖 Telegram通知: ⚠️ 未配置，已禁用（如需启用请在 Secrets 中设置 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID）")
+    print(f"🤖 Telegram通知: {'已启用' if UltimateConfig.TELEGRAM_CONFIG['enabled'] else '已禁用'}")
+    print(f"🔄 运行模式: 自动连续运行")
     print("=" * 70)
+    print("🎯 完整功能:")
+    print("   1. 趋势衰竭做空检测器")
+    print("   2. HYPE暴涨原因分析器")
+    print("   3. 智能币种分类器")
+    print("   4. 反弹失败确认K做空策略")
+    print("   5. 回调企稳确认K做多策略")
+    print("=" * 70)
+    try:
+        system = UltimateTradingSystem(
+            telegram_bot_token=TELEGRAM_BOT_TOKEN,
+            telegram_chat_id=TELEGRAM_CHAT_ID
+        )
 
-    # 创建系统实例
-    system = UltimateTradingSystem(
-        telegram_bot_token=TELEGRAM_BOT_TOKEN,
-        telegram_chat_id=TELEGRAM_CHAT_ID
-    )
-
-    if not system:
-        print("❌ 系统初始化失败，请检查错误日志")
-        return
-
-    # 发送额外的启动消息（如果 Telegram 可用）
-    if system.telegram:
-        try:
-            extra_startup_msg = f"""
+        # 发送额外的启动消息
+        if system.telegram:
+            try:
+                extra_startup_msg = f"""
 🔔 <b>系统配置详情</b>
 ━━━━━━━━━━━━━━━━━━━━
 📅 系统版本: {UltimateConfig.VERSION}
@@ -2324,27 +2392,38 @@ def main():
 ━━━━━━━━━━━━━━━━━━━━
 💡 <i>您将收到前3个最佳信号的详细分析</i>
 """
-            system.telegram.bot.send_message(
-                system.telegram.chat_id,
-                extra_startup_msg,
-                parse_mode='HTML'
-            )
-        except Exception as e:
-            print(f"⚠️ 发送额外启动消息失败: {e}")
+                system.telegram.bot.send_message(
+                    system.telegram.chat_id,
+                    extra_startup_msg,
+                    parse_mode='HTML'
+                )
+            except Exception as e:
+                print(f"⚠️ 发送额外启动消息失败: {e}")
 
-    # 检测是否在 GitHub Actions 环境中
-    if os.getenv('GITHUB_ACTIONS') == 'true':
-        print("\n🔧 检测到 GitHub Actions 环境，将以一次性模式运行单次分析")
+        return system
+    except Exception as e:
+        print(f"\n❌ 系统启动失败: {e}")
+        traceback.print_exc()
+        return None
+
+# ============ 立即运行 ============
+if __name__ == "__main__":
+    print("正在初始化终极智能交易系统...")
+    system = main()
+    if system:
+        print("\n✅ 系统初始化完成！")
+        print("\n🚀 立即运行首次增强分析周期...")
         signals = system.run_single_cycle()
-        print(f"\n✅ 本次分析完成，共发现 {len(signals) if signals else 0} 个信号。")
-        # 可选：发送运行状态消息（如果 Telegram 可用）
+
+        # 发送运行状态消息
         if system.telegram and signals:
             status_msg = f"""
-📈 <b>GitHub Actions 定时分析完成</b>
+📈 <b>首次分析完成</b>
 ━━━━━━━━━━━━━━━━━━━━
+✅ 系统已成功运行首次分析
 📊 发现 {len(signals)} 个交易信号
-⏰ 分析时间: {datetime.now().strftime('%H:%M:%S')}
-🔄 下次分析将由 GitHub Actions 定时触发
+⏰ 开始时间: {system.start_time.strftime('%H:%M:%S')}
+🔄 分析周期: {UltimateConfig.ANALYSIS_INTERVAL}分钟
 ━━━━━━━━━━━━━━━━━━━━
 🤖 <i>系统已进入自动监控模式</i>
 """
@@ -2356,12 +2435,8 @@ def main():
                 )
             except Exception as e:
                 print(f"⚠️ 发送状态消息失败: {e}")
-        print("\n🏁 GitHub Actions 任务结束，退出。")
-        return  # 退出程序，不进入连续循环
 
-    # 非 GitHub Actions 环境：进入连续监控模式
-    print("\n🚀 检测到本地运行，启动连续监控模式...")
-    system.run_continuous()
-
-if __name__ == "__main__":
-    main()
+        print("\n🚀 自动启动连续监控模式...")
+        system.run_continuous()
+    else:
+        print("\n❌ 系统初始化失败，请检查配置和网络连接")
