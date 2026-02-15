@@ -110,7 +110,7 @@ class UltimateConfig:
     # ----- ADX市场过滤（阈值提高至35，减少误杀）-----
     ADX_CONFIG = {
         'period': 14,
-        'trend_threshold': 35,      # 原25，提高至35，仅极强趋势才过滤
+        'trend_threshold': 25,      # 原25，提高至35，仅极强趋势才过滤
         'enabled': True
     }
 
@@ -146,7 +146,7 @@ class UltimateConfig:
             'name': '反弹模式',
             'enabled': True,
             'conditions': {
-                'max_rsi': 50,              # 原42 → 50
+                'max_rsi': 44,              # 原42 → 50
                 'min_volume_ratio': 0.6,    # 原0.7 → 0.6
                 'min_score': 30,            # 原35 → 30
                 'risk_reward': 2.2
@@ -178,8 +178,8 @@ class UltimateConfig:
             'name': '回调模式',
             'enabled': True,
             'conditions': {
-                'min_rsi': 50,              # 原55 → 50
-                'callback_range': {'min': 3, 'max': 20},  # 原5-15 → 3-20
+                'min_rsi': 55,              # 原55 → 50
+                'callback_range': {'min': 5, 'max': 20},  # 原5-15 → 3-20
                 'min_score': 35,            # 原40 → 35
                 'risk_reward': 2.2
             }
@@ -191,7 +191,7 @@ class UltimateConfig:
                 'min_score': 40,            # 原50 → 40
                 'max_callback_count': 1,
                 'min_entity_ratio': 0.5,    # 原0.6 → 0.5
-                'max_upper_shadow_ratio': 0.25,  # 原0.2 → 0.25
+                'max_upper_shadow_ratio': 0.2,  # 原0.2 → 0.25
                 'required_confirmation': 2,
                 'volume_requirement': 0.7,  # 原0.8 → 0.7
                 'risk_reward': 2.2
@@ -203,7 +203,7 @@ class UltimateConfig:
             'name': '突破失败做空',
             'enabled': True,
             'conditions': {
-                'min_rsi': 60,              # 原65 → 60
+                'min_rsi': 65,              # 原65 → 60
                 'breakout_failure_threshold': 0.98,
                 'min_score': 30,            # 原35 → 30
                 'risk_reward': 2.0
@@ -213,8 +213,8 @@ class UltimateConfig:
             'name': '反弹失败做空',
             'enabled': True,
             'conditions': {
-                'min_score': 40,            # 原45 → 40
-                'max_bounce_pct': 3.0,      # 原2.0 → 3.0
+                'min_score': 45,            # 原45 → 40
+                'max_bounce_pct': 2.0,      # 原2.0 → 3.0
                 'lookback_periods': 10,
                 'fib_threshold': 38.2,
                 'risk_reward': 2.0
@@ -224,7 +224,7 @@ class UltimateConfig:
             'name': '趋势衰竭做空',
             'enabled': True,
             'conditions': {
-                'min_score': 50,            # 原55 → 50
+                'min_score': 55,            # 原55 → 50
                 'trend_periods': 30,
                 'exhaustion_threshold': 0.6,
                 'volume_divergence_threshold': 0.7,
