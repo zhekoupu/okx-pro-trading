@@ -111,7 +111,7 @@ class UltimateConfig:
     ADX_CONFIG = {
         'period': 14,
         'trend_threshold': 15,      # 原25，提高至35，仅极强趋势才过滤
-        'enabled': True
+        'enabled': False
     }
 
     # ----- 回测配置（保持关闭，如需回测再开启）-----
