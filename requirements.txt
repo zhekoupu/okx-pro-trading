@@ -3,4 +3,3 @@ numpy
 requests
 pyTelegramBotAPI
 scipy
-TA-Lib  # 可选，若不需要可删除，代码会降级使用备用指标
