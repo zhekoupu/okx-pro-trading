@@ -2,7 +2,7 @@ name: Run Trading Bot
 
 on:
   schedule:
-    - cron: '0,45 * * * *'   # 每小时的0分和45分运行（≈每45分钟）
+    - cron: '0,450 * * * *'   # 每小时的0分和45分运行（≈每450分钟）
   workflow_dispatch:         # 支持手动触发
 
 jobs:
