@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v34.0 正式版
-功能：吞没形态 + RSI背离 + MACD柱体递减
+终极智能交易系统 v34.1 正式版（优化版）
+功能：吞没形态 + RSI背离 + MACD柱体递减 + Telegram自动重试
 适用于 GitHub Actions 定时运行，单次分析后退出
 """
 
@@ -34,6 +34,7 @@ OKX_API_BASE_URL = "https://www.okx.com"
 OKX_CANDLE_INTERVAL = ["15m", "1H"]
 OKX_CANDLE_LIMIT = 100
 
+# 监控币种列表（保持完整）
 MONITOR_COINS = [
     'BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'ADA', 'AVAX', 'DOT',
     'DOGE', 'LTC', 'UNI', 'LINK', 'ATOM', 'XLM', 'ALGO',
@@ -51,22 +52,28 @@ print(f"📊 监控币种列表: {len(MONITOR_COINS)} 个币种")
 
 # ============ 配置类 ============
 class UltimateConfig:
-    VERSION = "34.0-正式版（吞没+背离+MACD柱）"
+    VERSION = "34.1-正式版（优化重试+阈值调整）"
     MAX_SIGNALS_TO_SEND = 3          # 每次最多发送前3个信号
+    TELEGRAM_RETRY = 3                # 发送失败重试次数
+    TELEGRAM_RETRY_DELAY = 1          # 重试间隔（秒）
+    
     COOLDOWN_CONFIG = {
         'same_coin_cooldown': 90,
         'same_direction_cooldown': 45,
         'max_signals_per_coin_per_day': 5,
         'enable_cooldown': True
     }
+    
+    # 调整后的阈值：BOUNCE 从25提高到32，减少低频信号数量
     SIGNAL_THRESHOLDS = {
-        'BOUNCE': 25,
+        'BOUNCE': 32,                  # 原25 -> 32
         'BREAKOUT': 25,
         'TREND_EXHAUSTION': 35,
         'CALLBACK': 30,
         'CONFIRMATION_K': 40,
         'CALLBACK_CONFIRM_K': 45
     }
+    
     OPTIMIZATION_PARAMS = {
         'volume_ratio_min': 0.7,
         'rsi_bounce_max': 45,
@@ -75,6 +82,7 @@ class UltimateConfig:
         'callback_pct_max': 25,
         'trend_exhaustion_rsi_min': 65
     }
+    
     OKX_CONFIG = {
         'base_url': OKX_API_BASE_URL,
         'candle_endpoint': '/api/v5/market/candles',
@@ -334,7 +342,7 @@ class SignalChecker:
                 score += div_str * 25
 
             is_decl, decl_str = decline_info
-            if is_decl:   # 柱体递减对看涨有利（空头减弱）
+            if is_decl:
                 score += decl_str * 15
 
         else:  # SELL
@@ -350,13 +358,13 @@ class SignalChecker:
                 score += div_str * 25
 
             is_decl, decl_str = decline_info
-            if is_decl:   # 柱体递减对看跌有利（多头减弱）
+            if is_decl:
                 score += decl_str * 15
 
         score += engulf_strength * 15
         return int(min(score, 100))
 
-    # ---------- 其他评分函数（略，保持不变）----------
+    # ---------- 其他评分函数 ----------
     def _calculate_bounce_score(self, rsi, volume_ratio):
         score = 25
         score += (42 - max(20, rsi)) * 1.5
@@ -479,7 +487,7 @@ class SignalChecker:
         print(f"✅ 扫描完成: 发现 {len(all_signals)} 个交易信号")
         return all_signals
 
-    # ---------- 信号创建函数（含增强信息）----------
+    # ---------- 信号创建函数 ----------
     def _create_confirmation_k_signal(self, symbol, data, price, rsi, volume_ratio,
                                       ma20, ma50, direction, engulf_strength,
                                       div_info, decline_info, score):
@@ -542,7 +550,6 @@ class SignalChecker:
             }
         }
 
-    # 以下为原有信号创建函数（略，保持原样）
     def _create_bounce_signal(self, symbol, data, price, rsi, volume_ratio, ma20, score):
         recent_low = data['low'].rolling(20).min().iloc[-1]
         entry_main = price * 0.998
@@ -667,7 +674,7 @@ class SignalChecker:
         else:
             print(f"   未发现任何信号")
 
-# ============ Telegram 通知器 ============
+# ============ Telegram 通知器（带自动重试）============
 class TelegramNotifier:
     def __init__(self, bot_token, chat_id):
         self.bot_token = bot_token
@@ -688,19 +695,27 @@ class TelegramNotifier:
         if not self.bot:
             print(f"\n📨 [模拟发送] {signal['symbol']} - {signal['pattern']} ({signal['score']}分)")
             return True   # 模拟成功，记录冷却（便于测试）
-        try:
-            message = self._format_signal_message(signal, cooldown_reason)
-            self.bot.send_message(
-                self.chat_id,
-                message,
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
-            print(f"✅ Telegram 信号发送成功: {signal['symbol']} ({signal['pattern']})")
-            return True
-        except Exception as e:
-            print(f"❌ 发送信号失败 {signal['symbol']}: {str(e)[:100]}")
-            return False
+
+        # 带重试的发送
+        message = self._format_signal_message(signal, cooldown_reason)
+        for attempt in range(1, UltimateConfig.TELEGRAM_RETRY + 1):
+            try:
+                self.bot.send_message(
+                    self.chat_id,
+                    message,
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
+                print(f"✅ Telegram 信号发送成功: {signal['symbol']} ({signal['pattern']})")
+                return True
+            except Exception as e:
+                print(f"❌ 发送失败 (尝试 {attempt}/{UltimateConfig.TELEGRAM_RETRY}): {signal['symbol']} - {str(e)[:100]}")
+                if attempt < UltimateConfig.TELEGRAM_RETRY:
+                    time.sleep(UltimateConfig.TELEGRAM_RETRY_DELAY)
+                else:
+                    # 最后一次失败，记录错误
+                    print(f"   ⚠️ 信号 {signal['symbol']} 最终发送失败")
+        return False
 
     def _format_signal_message(self, signal, cooldown_reason=""):
         direction_emoji = "🟢" if signal['direction'] == 'BUY' else "🔴"
@@ -743,7 +758,7 @@ class TelegramNotifier:
 class UltimateTradingSystem:
     def __init__(self):
         print("\n" + "="*60)
-        print("🚀 终极智能交易系统 v34.0 - 吞没+背离+MACD柱")
+        print("🚀 终极智能交易系统 v34.1 - 吞没+背离+MACD柱+重试")
         print("="*60)
         self.data_fetcher = OKXDataFetcher()
         self.cooldown_manager = CooldownManager()
@@ -819,16 +834,16 @@ class UltimateTradingSystem:
                 )
                 self.total_signals += 1
                 sent_count += 1
-                time.sleep(2)
+                time.sleep(2)  # 避免发送过快触发限流
             else:
-                print(f"   ⚠️ 信号发送失败，跳过")
+                print(f"   ⚠️ 信号最终发送失败，跳过记录冷却")
 
         print(f"\n✅ 本次成功发送 {sent_count} 个交易信号")
 
 # ============ 主程序入口 ============
 def main():
     print("="*60)
-    print("🤖 终极智能交易系统 v34.0 - GitHub Actions 版")
+    print("🤖 终极智能交易系统 v34.1 - GitHub Actions 优化版")
     print("="*60)
     print(f"📅 版本: {UltimateConfig.VERSION}")
     print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
