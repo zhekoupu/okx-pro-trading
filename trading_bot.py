@@ -110,13 +110,13 @@ class UltimateConfig:
     # ----- ADX市场过滤（阈值提高至35，减少误杀）-----
     ADX_CONFIG = {
         'period': 14,
-        'trend_threshold': 20,      # 原25，提高至35，仅极强趋势才过滤
+        'trend_threshold': 15,      # 原25，提高至35，仅极强趋势才过滤
         'enabled': True
     }
 
     # ----- 回测配置（保持关闭，如需回测再开启）-----
     BACKTEST_CONFIG = {
-        'enabled': False,
+        'enabled': True,
         'start_date': (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d'),
         'end_date': datetime.now().strftime('%Y-%m-%d'),
         'symbols': ['BTC', 'ETH', 'SOL'],
