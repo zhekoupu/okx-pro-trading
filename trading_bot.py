@@ -116,7 +116,7 @@ class UltimateConfig:
 
     # ----- 回测配置（保持关闭，如需回测再开启）-----
     BACKTEST_CONFIG = {
-        'enabled': True,
+        'enabled': False,
         'start_date': (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d'),
         'end_date': datetime.now().strftime('%Y-%m-%d'),
         'symbols': ['BTC', 'ETH', 'SOL'],
