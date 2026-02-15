@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v33.9 GitHub Actions适配版
-适用于定时运行，单次分析后退出
+终极智能交易系统 v33.9 正式版（无 TA-Lib 依赖）
+适用于 GitHub Actions 定时运行，单次分析后退出
 """
 
 import os
@@ -16,32 +16,25 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Dict, List, Any, Tuple
 
-# ============ 导入库（需提前安装）============
+# ============ 导入库 ============
 import pandas as pd
 import numpy as np
 import telebot
 
-print("🔧 检查TA-Lib依赖...")
-try:
-    import talib
-    TALIB_AVAILABLE = True
-    print("✅ TA-Lib已安装，启用高级技术指标")
-except ImportError:
-    TALIB_AVAILABLE = False
-    print("⚠️ TA-Lib未安装，将使用备用技术指标")
+print("✅ 使用内置技术指标（无 TA-Lib 依赖）")
 
 # ============ 配置 ============
-# 从环境变量读取Telegram配置（GitHub Secrets传入）
+# 从环境变量读取 Telegram 配置（GitHub Secrets 传入）
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
+# 若未设置 Telegram 令牌，仅警告并禁用通知（便于本地测试）
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-    print("❌ 错误：未设置TELEGRAM_BOT_TOKEN或TELEGRAM_CHAT_ID环境变量")
-    sys.exit(1)
+    print("⚠️ 警告：未设置 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID，Telegram 通知已禁用")
+    TELEGRAM_BOT_TOKEN = ""
+    TELEGRAM_CHAT_ID = ""
 
-print(f"🤖 Telegram配置已加载（令牌: {TELEGRAM_BOT_TOKEN[:10]}...）")
-
-# OKX API配置
+# OKX API 配置
 OKX_API_BASE_URL = "https://www.okx.com"
 OKX_CANDLE_INTERVAL = ["15m", "1H"]
 OKX_CANDLE_LIMIT = 100
@@ -60,11 +53,11 @@ MONITOR_COINS = [
     'APE', 'LIT', 'GALA', 'IMX', 'AXS'
 ]
 
-print(f"📊 监控币种列表: {len(MONITOR_COINS)}个币种")
+print(f"📊 监控币种列表: {len(MONITOR_COINS)} 个币种")
 
 # ============ 配置类 ============
 class UltimateConfig:
-    VERSION = "33.9-GitHubActions版"
+    VERSION = "33.9-正式版（含吞没形态，无TA-Lib）"
     ANALYSIS_INTERVAL = 45  # 保留，但单次运行不使用
     COINS_TO_MONITOR = len(MONITOR_COINS)
     MAX_SIGNALS = 8
@@ -81,7 +74,7 @@ class UltimateConfig:
         'BREAKOUT': 25,
         'TREND_EXHAUSTION': 35,
         'CALLBACK': 30,
-        'CONFIRMATION_K': 40,
+        'CONFIRMATION_K': 40,       # 吞没形态阈值
         'CALLBACK_CONFIRM_K': 45
     }
 
@@ -173,7 +166,7 @@ class CooldownManager:
             'score': score
         })
 
-# ============ OKX数据获取器 ============
+# ============ OKX 数据获取器 ============
 class OKXDataFetcher:
     def __init__(self):
         self.config = UltimateConfig.OKX_CONFIG
@@ -243,7 +236,7 @@ class OKXDataFetcher:
         print(f"\n📊 数据获取完成: {len(coins_data)}/{total} 个币种")
         return coins_data
 
-# ============ 技术指标计算器 ============
+# ============ 技术指标计算器（纯 Pandas 实现，无 TA-Lib）============
 class TechnicalIndicators:
     @staticmethod
     def calculate_rsi(data: pd.DataFrame, period: int = 14):
@@ -271,11 +264,65 @@ class TechnicalIndicators:
         volume_ratio = current_volume / avg_volume
         return volume_ratio.fillna(1.0)
 
-# ============ 信号检查器 ============
+# ============ 信号检查器（含吞没形态）============
 class SignalChecker:
     def __init__(self):
         self.thresholds = UltimateConfig.SIGNAL_THRESHOLDS
         self.params = UltimateConfig.OPTIMIZATION_PARAMS
+
+    # ---------- 检测吞没形态（包含关系） ----------
+    def _detect_engulfing(self, data: pd.DataFrame) -> tuple:
+        """
+        检测最近两根K线是否存在吞没形态
+        返回 (方向, 吞没强度) ，方向为 'BUY' / 'SELL' / ''，强度为0~1
+        """
+        if len(data) < 2:
+            return '', 0.0
+
+        prev = data.iloc[-2]
+        curr = data.iloc[-1]
+
+        prev_body = abs(prev['close'] - prev['open'])
+        curr_body = abs(curr['close'] - curr['open'])
+        prev_open, prev_close = prev['open'], prev['close']
+        curr_open, curr_close = curr['open'], curr['close']
+
+        # 看涨吞没：前阴后阳，且阳线实体完全包含前一根阴线实体
+        if (prev_close < prev_open) and (curr_close > curr_open) and \
+           curr_open < prev_close and curr_close > prev_open:
+            strength = min(curr_body / prev_body, 2.0) if prev_body > 0 else 1.0
+            return 'BUY', strength
+
+        # 看跌吞没：前阳后阴，且阴线实体完全包含前一根阳线实体
+        if (prev_close > prev_open) and (curr_close < curr_open) and \
+           curr_open > prev_close and curr_close < prev_open:
+            strength = min(curr_body / prev_body, 2.0) if prev_body > 0 else 1.0
+            return 'SELL', strength
+
+        return '', 0.0
+
+    # ---------- 计算 CONFIRMATION_K 信号评分 ----------
+    def _calculate_confirmation_k_score(self, direction: str, rsi: float, volume_ratio: float, engulf_strength: float) -> int:
+        score = 40  # 基础分
+        if direction == 'BUY':
+            # 看涨吞没：RSI不宜过高，成交量放大加分
+            if rsi < 60:
+                score += (60 - rsi) * 1.0
+            if volume_ratio > 1.2:
+                score += 20
+            elif volume_ratio > 1.0:
+                score += 10
+        else:  # SELL
+            if rsi > 40:
+                score += (rsi - 40) * 1.0
+            if volume_ratio > 1.2:
+                score += 20
+            elif volume_ratio > 1.0:
+                score += 10
+
+        # 吞没强度加分
+        score += engulf_strength * 15
+        return int(min(score, 100))
 
     def check_all_coins(self, coins_data):
         print(f"\n🔍 开始信号扫描 ({len(coins_data)}个币种)...")
@@ -339,6 +386,19 @@ class SignalChecker:
                         signals.append(signal)
                         signal_counts['TREND_EXHAUSTION'] += 1
 
+                # 吞没形态信号 CONFIRMATION_K
+                engulf_dir, engulf_strength = self._detect_engulfing(data_15m)
+                if engulf_dir:
+                    score = self._calculate_confirmation_k_score(engulf_dir, rsi, volume_ratio, engulf_strength)
+                    if score >= self.thresholds['CONFIRMATION_K']:
+                        signal = self._create_confirmation_k_signal(
+                            symbol, data_15m, current_price, rsi, volume_ratio,
+                            ma20, ma50, engulf_dir, engulf_strength, score
+                        )
+                        signals.append(signal)
+                        signal_counts['CONFIRMATION_K'] += 1
+
+                # 选择最佳信号（按分数）
                 if signals:
                     best_signal = max(signals, key=lambda x: x.get('score', 0))
                     all_signals.append(best_signal)
@@ -350,6 +410,7 @@ class SignalChecker:
         print(f"✅ 扫描完成: 发现 {len(all_signals)} 个交易信号")
         return all_signals
 
+    # ---------- 评分函数 ----------
     def _calculate_bounce_score(self, rsi, volume_ratio):
         score = 25
         score += (42 - max(20, rsi)) * 1.5
@@ -385,6 +446,7 @@ class SignalChecker:
             score += 20
         return int(score)
 
+    # ---------- 信号创建函数 ----------
     def _create_bounce_signal(self, symbol, data, price, rsi, volume_ratio, ma20, score):
         recent_low = data['low'].rolling(20).min().iloc[-1]
         entry_main = price * 0.998
@@ -520,6 +582,63 @@ class SignalChecker:
             }
         }
 
+    def _create_confirmation_k_signal(self, symbol, data, price, rsi, volume_ratio,
+                                      ma20, ma50, direction, engulf_strength, score):
+        # 计算止损止盈（根据方向）
+        if direction == 'BUY':
+            recent_low = data['low'].rolling(10).min().iloc[-1]
+            entry_main = price * 1.002  # 略高于现价，确认突破
+            stop_loss = recent_low * 0.985
+            take_profit1 = price * 1.04
+            take_profit2 = price * 1.08
+            risk = entry_main - stop_loss
+            reward = take_profit2 - entry_main
+            reason = (
+                f"🟢 <b>看涨吞没形态确认</b>\n\n"
+                f"• 前一根阴线被当前阳线完全吞没\n"
+                f"• 吞没强度: {engulf_strength:.2f}\n"
+                f"• 成交量放大{volume_ratio:.1f}倍\n"
+                f"• RSI({rsi:.1f})处于合理区域\n"
+                f"• 建议在${entry_main:.4f}附近买入"
+            )
+        else:  # SELL
+            recent_high = data['high'].rolling(10).max().iloc[-1]
+            entry_main = price * 0.998  # 略低于现价
+            stop_loss = recent_high * 1.02
+            take_profit1 = price * 0.96
+            take_profit2 = price * 0.93
+            risk = stop_loss - entry_main
+            reward = entry_main - take_profit2
+            reason = (
+                f"🔴 <b>看跌吞没形态确认</b>\n\n"
+                f"• 前一根阳线被当前阴线完全吞没\n"
+                f"• 吞没强度: {engulf_strength:.2f}\n"
+                f"• 成交量放大{volume_ratio:.1f}倍\n"
+                f"• RSI({rsi:.1f})偏高，有回调压力\n"
+                f"• 建议在${entry_main:.4f}附近做空"
+            )
+
+        risk_reward = round(reward / risk, 2) if risk > 0 else 0
+
+        return {
+            'symbol': symbol,
+            'pattern': 'CONFIRMATION_K',
+            'direction': direction,
+            'rsi': round(float(rsi), 1),
+            'volume_ratio': round(volume_ratio, 2),
+            'score': int(score),
+            'current_price': round(price, 4),
+            'signal_time': datetime.now(),
+            'reason': reason,
+            'entry_points': {
+                'main_entry': round(entry_main, 6),
+                'stop_loss': round(stop_loss, 6),
+                'take_profit1': round(take_profit1, 6),
+                'take_profit2': round(take_profit2, 6),
+                'risk_reward': risk_reward
+            }
+        }
+
     def _print_statistics(self, signal_counts, total_coins):
         print(f"\n📊 信号检查统计:")
         print(f"   检查币种数: {total_coins}")
@@ -532,23 +651,27 @@ class SignalChecker:
         else:
             print(f"   未发现任何信号")
 
-# ============ Telegram通知器 ============
+# ============ Telegram 通知器 ============
 class TelegramNotifier:
     def __init__(self, bot_token, chat_id):
         self.bot_token = bot_token
         self.chat_id = chat_id
         self.bot = None
-        try:
-            self.bot = telebot.TeleBot(bot_token, parse_mode='HTML')
-            bot_info = self.bot.get_me()
-            print(f"✅ Telegram连接成功: @{bot_info.username}")
-        except Exception as e:
-            print(f"❌ Telegram连接失败: {e}")
-            self.bot = None
+        if bot_token and chat_id:
+            try:
+                self.bot = telebot.TeleBot(bot_token, parse_mode='HTML')
+                bot_info = self.bot.get_me()
+                print(f"✅ Telegram 连接成功: @{bot_info.username}")
+            except Exception as e:
+                print(f"❌ Telegram 连接失败: {e}")
+                self.bot = None
+        else:
+            print("⚠️ Telegram 未配置，通知功能已禁用")
 
     def send_signal(self, signal, cooldown_reason=""):
         if not self.bot:
-            print(f"⚠️ Telegram未启用，跳过信号发送: {signal['symbol']}")
+            # 无 Telegram 时，将信号打印到控制台（便于测试）
+            print(f"\n📨 [模拟发送] {signal['symbol']} - {signal['pattern']} ({signal['score']}分)")
             return False
         try:
             message = self._format_signal_message(signal, cooldown_reason)
@@ -558,7 +681,7 @@ class TelegramNotifier:
                 parse_mode='HTML',
                 disable_web_page_preview=True
             )
-            print(f"✅ Telegram信号发送成功: {signal['symbol']} ({signal['pattern']})")
+            print(f"✅ Telegram 信号发送成功: {signal['symbol']} ({signal['pattern']})")
             return True
         except Exception as e:
             print(f"❌ 发送信号失败 {signal['symbol']}: {str(e)[:100]}")
@@ -571,6 +694,7 @@ class TelegramNotifier:
             'BREAKOUT': '⚡',
             'CALLBACK': '🔄',
             'CALLBACK_CONFIRM_K': '🚀',
+            'CONFIRMATION_K': '🔰',
             'TREND_EXHAUSTION': '📉'
         }.get(signal['pattern'], '💰')
         entry = signal['entry_points']
@@ -608,7 +732,7 @@ class TelegramNotifier:
 class UltimateTradingSystem:
     def __init__(self):
         print("\n" + "="*60)
-        print("🚀 终极智能交易系统 v33.9 - GitHub Actions版")
+        print("🚀 终极智能交易系统 v33.9 - 正式版（含吞没形态，无TA-Lib）")
         print("="*60)
         self.data_fetcher = OKXDataFetcher()
         self.cooldown_manager = CooldownManager()
@@ -619,7 +743,7 @@ class UltimateTradingSystem:
         self.start_time = datetime.now()
         print(f"\n✅ 系统初始化完成")
         print(f"📡 监控币种: {len(MONITOR_COINS)}个")
-        print(f"🤖 Telegram通知: {'✅ 已启用' if self.telegram.bot else '⚠️ 已禁用'}")
+        print(f"🤖 Telegram 通知: {'✅ 已启用' if self.telegram.bot else '⚠️ 已禁用'}")
         print("="*60)
 
     def run_analysis(self):
@@ -674,34 +798,32 @@ class UltimateTradingSystem:
                 print(f"   ⚠️ 冷却阻止: {cooldown_reason}")
                 continue
 
-            if self.telegram and self.telegram.bot:
-                success = self.telegram.send_signal(signal, cooldown_reason)
-                if success:
-                    self.cooldown_manager.record_signal(
-                        symbol,
-                        signal.get('direction', 'BUY'),
-                        pattern,
-                        score
-                    )
-                    self.total_signals += 1
-                    sent_count += 1
-                    time.sleep(2)
-                else:
-                    print(f"   ⚠️ 信号发送失败，跳过")
+            # 即使 Telegram 未启用，也尝试发送（内部会打印模拟信息）
+            success = self.telegram.send_signal(signal, cooldown_reason)
+            if success:
+                self.cooldown_manager.record_signal(
+                    symbol,
+                    signal.get('direction', 'BUY'),
+                    pattern,
+                    score
+                )
+                self.total_signals += 1
+                sent_count += 1
+                time.sleep(2)
             else:
-                print(f"   ⚠️ Telegram未启用，跳过发送")
+                print(f"   ⚠️ 信号发送失败，跳过")
 
         print(f"\n✅ 本次成功发送 {sent_count} 个交易信号")
 
 # ============ 主程序入口 ============
 def main():
     print("="*60)
-    print("🤖 终极智能交易系统 v33.9 - GitHub Actions版")
+    print("🤖 终极智能交易系统 v33.9 - GitHub Actions 正式版（无TA-Lib）")
     print("="*60)
     print(f"📅 版本: {UltimateConfig.VERSION}")
     print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📊 监控币种: {len(MONITOR_COINS)}个")
-    print(f"🎯 信号模式: 4种优化策略（包含CALLBACK_CONFIRM_K）")
+    print(f"🎯 信号模式: 5种优化策略（含吞没形态 CONFIRMATION_K）")
     print("="*60)
 
     try:
@@ -714,7 +836,6 @@ def main():
         else:
             print("\n📊 本次分析未发现信号")
 
-        # 在GitHub Actions环境下，直接退出（无需等待）
         print("\n🏁 单次运行完成，退出。")
         sys.exit(0)
 
