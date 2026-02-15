@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v34.6 正式版
-改进：趋势方向增强判断（EMA斜率）+ ATR止损百分比限制 + 冷却区分方向
+终极智能交易系统 v34.8 正式版
+改进：EMA斜率多周期判断 + 复用趋势模式避免重复计算
 适用于 GitHub Actions 定时运行，单次分析后退出
 """
 
@@ -52,14 +52,14 @@ print(f"📊 监控币种列表: {len(MONITOR_COINS)} 个币种")
 
 # ============ 配置类 ============
 class UltimateConfig:
-    VERSION = "34.6-正式版（趋势增强+ATR上限+方向冷却）"
+    VERSION = "34.8-正式版（EMA多周期斜率+复用趋势模式）"
     MAX_SIGNALS_TO_SEND = 3
     TELEGRAM_RETRY = 3
     TELEGRAM_RETRY_DELAY = 1
     
     COOLDOWN_CONFIG = {
-        'same_coin_cooldown': 90,          # 默认冷却（当没有动态冷却是使用）
-        'same_direction_cooldown': 45,      # 同一方向额外冷却（可选，但我们现在按方向独立冷却，此配置可保留）
+        'same_coin_cooldown': 90,
+        'same_direction_cooldown': 45,
         'max_signals_per_coin_per_day': 5,
         'enable_cooldown': True
     }
@@ -110,6 +110,8 @@ class UltimateConfig:
     # 趋势方向匹配得分
     TREND_MATCH_SCORE = 1.0      # 顺趋势
     TREND_MISMATCH_SCORE = 0.2   # 逆趋势
+    TREND_NEUTRAL_SCORE = 0.5    # 无明显趋势方向时的中间分
+    MIN_TREND_SLOPE_PERCENT = 0.001  # 最小斜率阈值 0.1%
     
     # 背离复合强度系数
     DIVERGENCE_WEIGHTS = {
@@ -128,7 +130,7 @@ class UltimateConfig:
     }
     
     ATR_STOP_MULTIPLIER = 1.5
-    MAX_STOP_PERCENT = 0.06       # 最大止损距离为价格的6%，防止ATR过大导致止损过远
+    MAX_STOP_PERCENT = 0.06       # 最大止损距离为价格的6%
 
     # 趋势模式与信号类型的匹配规则
     TREND_SIGNAL_ALLOW = {
@@ -153,7 +155,6 @@ class CooldownManager:
                 with open(self.cooldown_file, 'rb') as f:
                     data = pickle.load(f)
                     self.cooldown_db = data.get('cooldown_db', {})
-                    # 兼容旧版：如果键不含方向，尝试转换（可选，但新版我们强制使用带方向的键）
                     self.signal_history = defaultdict(list, data.get('signal_history', {}))
                 print(f"✅ 冷却状态已加载: {len(self.cooldown_db)}个记录")
         except Exception as e:
@@ -466,27 +467,44 @@ class SignalChecker:
         else:
             return 'TREND'
 
-    # ---------- 趋势方向匹配评分（改进版：考虑EMA斜率） ----------
+    # ---------- 趋势方向匹配评分（改进：多周期斜率） ----------
     def _get_trend_score(self, data: pd.DataFrame, signal_direction: str, trend_mode: str) -> float:
         """
         根据趋势模式和信号方向返回趋势维度的得分（0~1）
-        在TREND模式下，使用EMA20斜率判断趋势方向，避免价格刺破EMA的假突破
+        在TREND模式下，使用EMA20的多周期斜率判断趋势方向，避免单根K线干扰
         """
         if trend_mode == 'RANGE':
             return 0.3
         elif trend_mode == 'TRANSITION':
             return 0.6
         
-        # TREND模式：需要判断方向是否匹配
+        # TREND模式
         ema20 = TechnicalIndicators.calculate_ema(data, 20)
-        ema20_current = ema20.iloc[-1]
-        ema20_prev = ema20.iloc[-2] if len(ema20) > 1 else ema20_current
+        if len(ema20) < 4:  # 至少需要4个点才能计算跨越3根的斜率
+            # 数据不足，回退到单根斜率
+            if len(ema20) < 2:
+                return UltimateConfig.TREND_NEUTRAL_SCORE
+            ema20_current = ema20.iloc[-1]
+            ema20_prev = ema20.iloc[-2]
+            slope_ratio = (ema20_current - ema20_prev) / ema20_prev
+        else:
+            # 使用当前EMA20与3根前的EMA20比较（跨越3根K线）
+            ema20_current = ema20.iloc[-1]
+            ema20_prev3 = ema20.iloc[-4]  # -4到-1跨越3根
+            slope_ratio = (ema20_current - ema20_prev3) / ema20_prev3
         
-        # 趋势向上：EMA20上升且当前价格在EMA20之上（可选，这里主要用EMA20斜率）
-        trend_up = ema20_current > ema20_prev
-        trend_down = ema20_current < ema20_prev
+        min_slope = UltimateConfig.MIN_TREND_SLOPE_PERCENT
         
-        # 信号方向与趋势方向匹配判断
+        if slope_ratio > min_slope:
+            trend_up = True
+            trend_down = False
+        elif slope_ratio < -min_slope:
+            trend_up = False
+            trend_down = True
+        else:
+            # 斜率太小，视为无明显趋势方向
+            return UltimateConfig.TREND_NEUTRAL_SCORE
+        
         if (signal_direction == 'BUY' and trend_up) or (signal_direction == 'SELL' and trend_down):
             return UltimateConfig.TREND_MATCH_SCORE
         else:
@@ -520,10 +538,15 @@ class SignalChecker:
             return 'SELL', strength
         return '', 0.0
 
-    # ---------- 增强版 CONFIRMATION_K 评分 ----------
+    # ---------- 增强版 CONFIRMATION_K 评分（复用trend_mode参数）----------
     def _calculate_confirmation_k_score_advanced(self, direction: str, rsi: float, volume_ratio: float,
                                                  engulf_strength: float, div_info: tuple, decline_info: tuple,
-                                                 data: pd.DataFrame, macd_df: pd.DataFrame) -> int:
+                                                 data: pd.DataFrame, macd_df: pd.DataFrame,
+                                                 trend_mode: str = None) -> int:
+        """
+        基于四个维度的加权评分
+        若传入trend_mode则直接使用，避免重复计算ADX
+        """
         # 1. 结构强度 (40%)
         div_type, div_str = div_info
         structure = 0.0
@@ -553,8 +576,9 @@ class SignalChecker:
         # 3. 量能确认 (15%)
         volume = min(volume_ratio / 2.0, 1.0)
         
-        # 4. 趋势匹配 (20%) —— 使用改进的趋势方向评分
-        trend_mode = self._get_trend_mode(data)
+        # 4. 趋势匹配 (20%) —— 使用传入的trend_mode（若未提供则计算）
+        if trend_mode is None:
+            trend_mode = self._get_trend_mode(data)
         trend_score = self._get_trend_score(data, direction, trend_mode)
         
         w = UltimateConfig.CONFIRMATION_K_WEIGHTS
@@ -641,7 +665,8 @@ class SignalChecker:
                     
                     score = self._calculate_confirmation_k_score_advanced(
                         engulf_dir, rsi, volume_ratio, engulf_strength,
-                        div_info, decline_info, data_15m, macd_df
+                        div_info, decline_info, data_15m, macd_df,
+                        trend_mode=trend_mode  # 传入已计算的趋势模式
                     )
                     
                     if score >= self.thresholds['CONFIRMATION_K']:
@@ -710,12 +735,9 @@ class SignalChecker:
         if direction == 'BUY':
             recent_low = data['low'].rolling(10).min().iloc[-1]
             entry_main = price * 1.002
-            # ATR止损
             stop_loss_candidate1 = recent_low * 0.985
             stop_loss_candidate2 = price - atr * atr_mult
-            # 取较大者（离现价更远）但不超过最大止损百分比
             stop_loss = max(stop_loss_candidate1, stop_loss_candidate2)
-            # 限制止损距离不超过 max_stop_pct * price
             min_stop = price * (1 - max_stop_pct)
             stop_loss = max(stop_loss, min_stop)
             take_profit1 = price * 1.04
@@ -738,7 +760,6 @@ class SignalChecker:
             entry_main = price * 0.998
             stop_loss_candidate1 = recent_high * 1.02
             stop_loss_candidate2 = price + atr * atr_mult
-            # 取较小者（离现价更远）但不超过最大止损百分比
             stop_loss = min(stop_loss_candidate1, stop_loss_candidate2)
             max_stop = price * (1 + max_stop_pct)
             stop_loss = min(stop_loss, max_stop)
@@ -1067,7 +1088,7 @@ def main():
     print(f"📅 版本: {UltimateConfig.VERSION}")
     print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📊 监控币种: {len(MONITOR_COINS)}个")
-    print(f"🎯 信号模式: 5种策略 + 增强型吞没(复合背离/方向MACD/动态冷却/ATR/趋势增强/方向冷却)")
+    print(f"🎯 信号模式: 5种策略 + 增强型吞没(复合背离/方向MACD/动态冷却/ATR/趋势增强/方向冷却/多周期斜率)")
     print("="*60)
 
     try:
