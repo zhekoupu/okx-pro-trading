@@ -1,36 +1,32 @@
-name: Run Trading Bot
+name: Trading bot
 
 on:
   schedule:
-    - cron: '0,450 * * * *'   # 每小时的0分和45分运行（≈每450分钟）
-  workflow_dispatch:         # 支持手动触发
+    - cron: '*/450 * * * *'   # 每45分钟运行一次
+  workflow_dispatch:          # 允许手动触发
 
 jobs:
-  run:
+  analyze:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
+          python-version: '3.10'
       - name: Cache cooldown state
         uses: actions/cache@v4
         with:
           path: cooldown_state.pkl
-          key: cooldown-state
-
-      - name: Run trading bot (once)
+          key: cooldown-${{ github.run_id }}
+          restore-keys: |
+            cooldown-
+      - name: Install dependencies
+        run: |
+          pip install pandas numpy requests pyTelegramBotAPI scipy
+          # 如果不需要TA-Lib，可以跳过；如需安装，参考 TA-Lib 官方文档
+      - name: Run analysis
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python trading_bot.py --once
+        run: python Trading_bot.py
