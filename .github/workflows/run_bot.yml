@@ -1,43 +1,31 @@
-name: 终极智能交易系统
+name: Run Trading Signal Analysis
 
 on:
   schedule:
-    # 每45分钟运行一次（与代码中的 ANALYSIS_INTERVAL 一致）
-    - cron: '*/45 * * * *'
-  workflow_dispatch:  # 允许手动触发
+    - cron: '*/45 * * * *'   # 每45分钟运行一次
+  workflow_dispatch:          # 允许手动触发
 
 jobs:
-  run-bot:
+  analyze:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 设置 Python
+      - uses: actions/checkout@v4
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
-      - name: 缓存 pip 依赖
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: 安装依赖
-        run: pip install -r requirements.txt
-
-      - name: 恢复冷却状态缓存
+      - name: Cache cooldown state
         uses: actions/cache@v4
         with:
           path: cooldown_state.pkl
           key: cooldown-${{ github.run_id }}
           restore-keys: |
             cooldown-
-
-      - name: 运行交易系统
+      - name: Install dependencies
+        run: |
+          pip install pandas numpy requests pyTelegramBotAPI scipy
+          # 如果不需要TA-Lib，可以跳过；如需安装，参考 TA-Lib 官方文档
+      - name: Run analysis
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
