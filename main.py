@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v33.9 正式版（无 TA-Lib 依赖）
+终极智能交易系统 v34.0 正式版
+功能：吞没形态 + RSI背离 + MACD柱体递减
 适用于 GitHub Actions 定时运行，单次分析后退出
 """
 
@@ -12,34 +13,27 @@ import pickle
 import atexit
 import requests
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import defaultdict
 from typing import Dict, List, Any, Tuple
 
-# ============ 导入库 ============
 import pandas as pd
 import numpy as np
 import telebot
 
-print("✅ 使用内置技术指标（无 TA-Lib 依赖）")
-
 # ============ 配置 ============
-# 从环境变量读取 Telegram 配置（GitHub Secrets 传入）
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# 若未设置 Telegram 令牌，仅警告并禁用通知（便于本地测试）
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     print("⚠️ 警告：未设置 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID，Telegram 通知已禁用")
     TELEGRAM_BOT_TOKEN = ""
     TELEGRAM_CHAT_ID = ""
 
-# OKX API 配置
 OKX_API_BASE_URL = "https://www.okx.com"
 OKX_CANDLE_INTERVAL = ["15m", "1H"]
 OKX_CANDLE_LIMIT = 100
 
-# 监控币种列表（保持完整）
 MONITOR_COINS = [
     'BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'ADA', 'AVAX', 'DOT',
     'DOGE', 'LTC', 'UNI', 'LINK', 'ATOM', 'XLM', 'ALGO',
@@ -57,27 +51,22 @@ print(f"📊 监控币种列表: {len(MONITOR_COINS)} 个币种")
 
 # ============ 配置类 ============
 class UltimateConfig:
-    VERSION = "33.9-正式版（含吞没形态，无TA-Lib）"
-    ANALYSIS_INTERVAL = 45  # 保留，但单次运行不使用
-    COINS_TO_MONITOR = len(MONITOR_COINS)
-    MAX_SIGNALS = 8
-
+    VERSION = "34.0-正式版（吞没+背离+MACD柱）"
+    MAX_SIGNALS_TO_SEND = 3          # 每次最多发送前3个信号
     COOLDOWN_CONFIG = {
         'same_coin_cooldown': 90,
         'same_direction_cooldown': 45,
         'max_signals_per_coin_per_day': 5,
         'enable_cooldown': True
     }
-
     SIGNAL_THRESHOLDS = {
         'BOUNCE': 25,
         'BREAKOUT': 25,
         'TREND_EXHAUSTION': 35,
         'CALLBACK': 30,
-        'CONFIRMATION_K': 40,       # 吞没形态阈值
+        'CONFIRMATION_K': 40,
         'CALLBACK_CONFIRM_K': 45
     }
-
     OPTIMIZATION_PARAMS = {
         'volume_ratio_min': 0.7,
         'rsi_bounce_max': 45,
@@ -86,7 +75,6 @@ class UltimateConfig:
         'callback_pct_max': 25,
         'trend_exhaustion_rsi_min': 65
     }
-
     OKX_CONFIG = {
         'base_url': OKX_API_BASE_URL,
         'candle_endpoint': '/api/v5/market/candles',
@@ -97,15 +85,7 @@ class UltimateConfig:
         'timeout': 15
     }
 
-    TELEGRAM_CONFIG = {
-        'enabled': True,
-        'parse_mode': 'HTML',
-        'always_send_signals': True,
-        'send_market_reports': False,
-        'send_classification_reports': False
-    }
-
-# ============ 冷却管理器（保留文件持久化）============
+# ============ 冷却管理器 ============
 class CooldownManager:
     def __init__(self):
         self.config = UltimateConfig.COOLDOWN_CONFIG
@@ -236,7 +216,7 @@ class OKXDataFetcher:
         print(f"\n📊 数据获取完成: {len(coins_data)}/{total} 个币种")
         return coins_data
 
-# ============ 技术指标计算器（纯 Pandas 实现，无 TA-Lib）============
+# ============ 技术指标计算器（纯 Pandas）============
 class TechnicalIndicators:
     @staticmethod
     def calculate_rsi(data: pd.DataFrame, period: int = 14):
@@ -264,54 +244,99 @@ class TechnicalIndicators:
         volume_ratio = current_volume / avg_volume
         return volume_ratio.fillna(1.0)
 
-# ============ 信号检查器（含吞没形态）============
+    @staticmethod
+    def calculate_macd(data: pd.DataFrame, fast_period=12, slow_period=26, signal_period=9):
+        close = data['close']
+        exp1 = close.ewm(span=fast_period, adjust=False).mean()
+        exp2 = close.ewm(span=slow_period, adjust=False).mean()
+        macd = exp1 - exp2
+        signal = macd.ewm(span=signal_period, adjust=False).mean()
+        histogram = macd - signal
+        return pd.DataFrame({'macd': macd, 'signal': signal, 'histogram': histogram}, index=data.index)
+
+# ============ 信号检查器（增强版）============
 class SignalChecker:
     def __init__(self):
         self.thresholds = UltimateConfig.SIGNAL_THRESHOLDS
         self.params = UltimateConfig.OPTIMIZATION_PARAMS
 
-    # ---------- 检测吞没形态（包含关系） ----------
+    # ---------- 吞没形态检测 ----------
     def _detect_engulfing(self, data: pd.DataFrame) -> tuple:
-        """
-        检测最近两根K线是否存在吞没形态
-        返回 (方向, 吞没强度) ，方向为 'BUY' / 'SELL' / ''，强度为0~1
-        """
         if len(data) < 2:
             return '', 0.0
-
         prev = data.iloc[-2]
         curr = data.iloc[-1]
-
         prev_body = abs(prev['close'] - prev['open'])
         curr_body = abs(curr['close'] - curr['open'])
         prev_open, prev_close = prev['open'], prev['close']
         curr_open, curr_close = curr['open'], curr['close']
 
-        # 看涨吞没：前阴后阳，且阳线实体完全包含前一根阴线实体
         if (prev_close < prev_open) and (curr_close > curr_open) and \
            curr_open < prev_close and curr_close > prev_open:
             strength = min(curr_body / prev_body, 2.0) if prev_body > 0 else 1.0
             return 'BUY', strength
-
-        # 看跌吞没：前阳后阴，且阴线实体完全包含前一根阳线实体
         if (prev_close > prev_open) and (curr_close < curr_open) and \
            curr_open > prev_close and curr_close < prev_open:
             strength = min(curr_body / prev_body, 2.0) if prev_body > 0 else 1.0
             return 'SELL', strength
-
         return '', 0.0
 
-    # ---------- 计算 CONFIRMATION_K 信号评分 ----------
-    def _calculate_confirmation_k_score(self, direction: str, rsi: float, volume_ratio: float, engulf_strength: float) -> int:
-        score = 40  # 基础分
+    # ---------- RSI 背离检测 ----------
+    def _detect_rsi_divergence(self, data: pd.DataFrame, rsi_series: pd.Series, lookback=30) -> tuple:
+        if len(data) < lookback:
+            return None, 0.0
+        price_lows = data['low'].iloc[-lookback:].values
+        price_highs = data['high'].iloc[-lookback:].values
+        rsi_vals = rsi_series.iloc[-lookback:].values
+
+        # 看涨底背离：价格创30日新低，但RSI未创新低
+        if price_lows[-1] == np.min(price_lows):
+            min_rsi_before = np.min(rsi_vals[:-1]) if len(rsi_vals) > 1 else rsi_vals[-1]
+            if min_rsi_before < rsi_vals[-1]:
+                strength = min((rsi_vals[-1] - min_rsi_before) / 20, 1.0)
+                return 'bullish', strength
+
+        # 看跌顶背离：价格创30日新高，但RSI未创新高
+        if price_highs[-1] == np.max(price_highs):
+            max_rsi_before = np.max(rsi_vals[:-1]) if len(rsi_vals) > 1 else rsi_vals[-1]
+            if max_rsi_before > rsi_vals[-1]:
+                strength = min((max_rsi_before - rsi_vals[-1]) / 20, 1.0)
+                return 'bearish', strength
+
+        return None, 0.0
+
+    # ---------- MACD 柱体递减检测 ----------
+    def _detect_macd_hist_decline(self, hist_series: pd.Series, periods=3) -> tuple:
+        if len(hist_series) < periods:
+            return False, 0.0
+        recent = hist_series.iloc[-periods:].values
+        is_declining = all(recent[i] < recent[i-1] for i in range(1, len(recent)))
+        if is_declining:
+            decline_ratio = (recent[0] - recent[-1]) / (abs(recent[0]) + 1e-6)
+            strength = min(abs(decline_ratio), 1.0)
+            return True, strength
+        return False, 0.0
+
+    # ---------- 增强版 CONFIRMATION_K 评分 ----------
+    def _calculate_confirmation_k_score(self, direction: str, rsi: float, volume_ratio: float,
+                                        engulf_strength: float, div_info: tuple, decline_info: tuple) -> int:
+        score = 40
         if direction == 'BUY':
-            # 看涨吞没：RSI不宜过高，成交量放大加分
             if rsi < 60:
                 score += (60 - rsi) * 1.0
             if volume_ratio > 1.2:
                 score += 20
             elif volume_ratio > 1.0:
                 score += 10
+
+            div_type, div_str = div_info
+            if div_type == 'bullish':
+                score += div_str * 25
+
+            is_decl, decl_str = decline_info
+            if is_decl:   # 柱体递减对看涨有利（空头减弱）
+                score += decl_str * 15
+
         else:  # SELL
             if rsi > 40:
                 score += (rsi - 40) * 1.0
@@ -320,97 +345,18 @@ class SignalChecker:
             elif volume_ratio > 1.0:
                 score += 10
 
-        # 吞没强度加分
+            div_type, div_str = div_info
+            if div_type == 'bearish':
+                score += div_str * 25
+
+            is_decl, decl_str = decline_info
+            if is_decl:   # 柱体递减对看跌有利（多头减弱）
+                score += decl_str * 15
+
         score += engulf_strength * 15
         return int(min(score, 100))
 
-    def check_all_coins(self, coins_data):
-        print(f"\n🔍 开始信号扫描 ({len(coins_data)}个币种)...")
-        all_signals = []
-        signal_counts = defaultdict(int)
-
-        for symbol, data_dict in coins_data.items():
-            try:
-                if '15m' not in data_dict:
-                    continue
-                data_15m = data_dict['15m']
-                if len(data_15m) < 30:
-                    continue
-
-                current_price = data_15m['close'].iloc[-1]
-                rsi = TechnicalIndicators.calculate_rsi(data_15m, 14).iloc[-1]
-                volume_ratio = TechnicalIndicators.calculate_volume_ratio(data_15m, 20).iloc[-1]
-                ma20 = TechnicalIndicators.calculate_ma(data_15m, 20).iloc[-1]
-                ma50 = TechnicalIndicators.calculate_ma(data_15m, 50).iloc[-1]
-
-                signals = []
-
-                # 反弹信号
-                if rsi < self.params['rsi_bounce_max'] and volume_ratio > self.params['volume_ratio_min']:
-                    score = self._calculate_bounce_score(rsi, volume_ratio)
-                    if score >= self.thresholds['BOUNCE']:
-                        signal = self._create_bounce_signal(symbol, data_15m, current_price, rsi, volume_ratio, ma20, score)
-                        signals.append(signal)
-                        signal_counts['BOUNCE'] += 1
-
-                # 回调信号
-                if rsi > self.params['rsi_callback_min']:
-                    recent_high = data_15m['high'].iloc[-30:].max()
-                    callback_pct = ((recent_high - current_price) / recent_high) * 100
-                    if self.params['callback_pct_min'] <= callback_pct <= self.params['callback_pct_max']:
-                        score = self._calculate_callback_score(rsi, volume_ratio, callback_pct)
-                        if score >= self.thresholds['CALLBACK']:
-                            signal = self._create_callback_signal(symbol, data_15m, current_price, rsi, volume_ratio, recent_high, callback_pct, ma20, score)
-                            signals.append(signal)
-                            signal_counts['CALLBACK'] += 1
-
-                # 回调确认转强信号
-                if 48 <= rsi <= 72 and volume_ratio > 1.2:
-                    recent_high = data_15m['high'].iloc[-30:].max()
-                    callback_pct = ((recent_high - current_price) / recent_high) * 100
-                    if 2 <= callback_pct <= 15:
-                        recent_3_closes = data_15m['close'].iloc[-3:].values
-                        price_increasing = len(recent_3_closes) >= 2 and recent_3_closes[-1] > recent_3_closes[0]
-                        if price_increasing and ma20 > ma50 and current_price > ma20:
-                            score = self._calculate_callback_confirm_score(rsi, volume_ratio, callback_pct)
-                            if score >= self.thresholds['CALLBACK_CONFIRM_K']:
-                                signal = self._create_callback_confirm_signal(symbol, data_15m, current_price, rsi, volume_ratio, recent_high, callback_pct, ma20, ma50, score)
-                                signals.append(signal)
-                                signal_counts['CALLBACK_CONFIRM_K'] += 1
-
-                # 趋势衰竭做空信号
-                if rsi > self.params['trend_exhaustion_rsi_min'] and volume_ratio < 1.0:
-                    score = self._calculate_trend_exhaustion_score(rsi, volume_ratio)
-                    if score >= self.thresholds['TREND_EXHAUSTION']:
-                        signal = self._create_trend_exhaustion_signal(symbol, data_15m, current_price, rsi, volume_ratio, ma20, score)
-                        signals.append(signal)
-                        signal_counts['TREND_EXHAUSTION'] += 1
-
-                # 吞没形态信号 CONFIRMATION_K
-                engulf_dir, engulf_strength = self._detect_engulfing(data_15m)
-                if engulf_dir:
-                    score = self._calculate_confirmation_k_score(engulf_dir, rsi, volume_ratio, engulf_strength)
-                    if score >= self.thresholds['CONFIRMATION_K']:
-                        signal = self._create_confirmation_k_signal(
-                            symbol, data_15m, current_price, rsi, volume_ratio,
-                            ma20, ma50, engulf_dir, engulf_strength, score
-                        )
-                        signals.append(signal)
-                        signal_counts['CONFIRMATION_K'] += 1
-
-                # 选择最佳信号（按分数）
-                if signals:
-                    best_signal = max(signals, key=lambda x: x.get('score', 0))
-                    all_signals.append(best_signal)
-
-            except Exception as e:
-                continue
-
-        self._print_statistics(signal_counts, len(coins_data))
-        print(f"✅ 扫描完成: 发现 {len(all_signals)} 个交易信号")
-        return all_signals
-
-    # ---------- 评分函数 ----------
+    # ---------- 其他评分函数（略，保持不变）----------
     def _calculate_bounce_score(self, rsi, volume_ratio):
         score = 25
         score += (42 - max(20, rsi)) * 1.5
@@ -446,7 +392,157 @@ class SignalChecker:
             score += 20
         return int(score)
 
-    # ---------- 信号创建函数 ----------
+    # ---------- 主扫描函数 ----------
+    def check_all_coins(self, coins_data):
+        print(f"\n🔍 开始信号扫描 ({len(coins_data)}个币种)...")
+        all_signals = []
+        signal_counts = defaultdict(int)
+
+        for symbol, data_dict in coins_data.items():
+            try:
+                if '15m' not in data_dict:
+                    continue
+                data_15m = data_dict['15m']
+                if len(data_15m) < 30:
+                    continue
+
+                current_price = data_15m['close'].iloc[-1]
+                rsi = TechnicalIndicators.calculate_rsi(data_15m, 14).iloc[-1]
+                volume_ratio = TechnicalIndicators.calculate_volume_ratio(data_15m, 20).iloc[-1]
+                ma20 = TechnicalIndicators.calculate_ma(data_15m, 20).iloc[-1]
+                ma50 = TechnicalIndicators.calculate_ma(data_15m, 50).iloc[-1]
+
+                signals = []
+
+                # 反弹信号
+                if rsi < self.params['rsi_bounce_max'] and volume_ratio > self.params['volume_ratio_min']:
+                    score = self._calculate_bounce_score(rsi, volume_ratio)
+                    if score >= self.thresholds['BOUNCE']:
+                        signals.append(self._create_bounce_signal(symbol, data_15m, current_price, rsi, volume_ratio, ma20, score))
+                        signal_counts['BOUNCE'] += 1
+
+                # 回调信号
+                if rsi > self.params['rsi_callback_min']:
+                    recent_high = data_15m['high'].iloc[-30:].max()
+                    callback_pct = ((recent_high - current_price) / recent_high) * 100
+                    if self.params['callback_pct_min'] <= callback_pct <= self.params['callback_pct_max']:
+                        score = self._calculate_callback_score(rsi, volume_ratio, callback_pct)
+                        if score >= self.thresholds['CALLBACK']:
+                            signals.append(self._create_callback_signal(symbol, data_15m, current_price, rsi, volume_ratio, recent_high, callback_pct, ma20, score))
+                            signal_counts['CALLBACK'] += 1
+
+                # 回调确认转强信号
+                if 48 <= rsi <= 72 and volume_ratio > 1.2:
+                    recent_high = data_15m['high'].iloc[-30:].max()
+                    callback_pct = ((recent_high - current_price) / recent_high) * 100
+                    if 2 <= callback_pct <= 15:
+                        recent_3_closes = data_15m['close'].iloc[-3:].values
+                        price_increasing = len(recent_3_closes) >= 2 and recent_3_closes[-1] > recent_3_closes[0]
+                        if price_increasing and ma20 > ma50 and current_price > ma20:
+                            score = self._calculate_callback_confirm_score(rsi, volume_ratio, callback_pct)
+                            if score >= self.thresholds['CALLBACK_CONFIRM_K']:
+                                signals.append(self._create_callback_confirm_signal(symbol, data_15m, current_price, rsi, volume_ratio, recent_high, callback_pct, ma20, ma50, score))
+                                signal_counts['CALLBACK_CONFIRM_K'] += 1
+
+                # 趋势衰竭做空信号
+                if rsi > self.params['trend_exhaustion_rsi_min'] and volume_ratio < 1.0:
+                    score = self._calculate_trend_exhaustion_score(rsi, volume_ratio)
+                    if score >= self.thresholds['TREND_EXHAUSTION']:
+                        signals.append(self._create_trend_exhaustion_signal(symbol, data_15m, current_price, rsi, volume_ratio, ma20, score))
+                        signal_counts['TREND_EXHAUSTION'] += 1
+
+                # 吞没形态信号 CONFIRMATION_K（增强版）
+                engulf_dir, engulf_strength = self._detect_engulfing(data_15m)
+                if engulf_dir:
+                    rsi_series = TechnicalIndicators.calculate_rsi(data_15m, 14)
+                    macd_df = TechnicalIndicators.calculate_macd(data_15m)
+                    hist_series = macd_df['histogram']
+                    div_info = self._detect_rsi_divergence(data_15m, rsi_series, lookback=30)
+                    decline_info = self._detect_macd_hist_decline(hist_series, periods=3)
+                    score = self._calculate_confirmation_k_score(engulf_dir, rsi, volume_ratio,
+                                                                  engulf_strength, div_info, decline_info)
+                    if score >= self.thresholds['CONFIRMATION_K']:
+                        signals.append(self._create_confirmation_k_signal(
+                            symbol, data_15m, current_price, rsi, volume_ratio,
+                            ma20, ma50, engulf_dir, engulf_strength, div_info, decline_info, score))
+                        signal_counts['CONFIRMATION_K'] += 1
+
+                # 每个币种只取评分最高的信号
+                if signals:
+                    best_signal = max(signals, key=lambda x: x.get('score', 0))
+                    all_signals.append(best_signal)
+
+            except Exception as e:
+                continue
+
+        self._print_statistics(signal_counts, len(coins_data))
+        print(f"✅ 扫描完成: 发现 {len(all_signals)} 个交易信号")
+        return all_signals
+
+    # ---------- 信号创建函数（含增强信息）----------
+    def _create_confirmation_k_signal(self, symbol, data, price, rsi, volume_ratio,
+                                      ma20, ma50, direction, engulf_strength,
+                                      div_info, decline_info, score):
+        if direction == 'BUY':
+            recent_low = data['low'].rolling(10).min().iloc[-1]
+            entry_main = price * 1.002
+            stop_loss = recent_low * 0.985
+            take_profit1 = price * 1.04
+            take_profit2 = price * 1.08
+            risk = entry_main - stop_loss
+            reward = take_profit2 - entry_main
+
+            div_text = f"• RSI看涨背离强度: {div_info[1]:.2f}\n" if div_info[0] == 'bullish' else ""
+            decl_text = f"• MACD柱体递减强度: {decline_info[1]:.2f}\n" if decline_info[0] else ""
+            reason = (
+                f"🟢 <b>看涨吞没形态确认</b>\n\n"
+                f"• 前阴被后阳完全吞没，吞没强度: {engulf_strength:.2f}\n"
+                f"• 成交量放大{volume_ratio:.1f}倍\n"
+                f"• RSI({rsi:.1f})处于合理区域\n"
+                f"{div_text}{decl_text}"
+                f"• 建议在${entry_main:.4f}附近买入"
+            )
+        else:  # SELL
+            recent_high = data['high'].rolling(10).max().iloc[-1]
+            entry_main = price * 0.998
+            stop_loss = recent_high * 1.02
+            take_profit1 = price * 0.96
+            take_profit2 = price * 0.93
+            risk = stop_loss - entry_main
+            reward = entry_main - take_profit2
+
+            div_text = f"• RSI看跌背离强度: {div_info[1]:.2f}\n" if div_info[0] == 'bearish' else ""
+            decl_text = f"• MACD柱体递减强度: {decline_info[1]:.2f}\n" if decline_info[0] else ""
+            reason = (
+                f"🔴 <b>看跌吞没形态确认</b>\n\n"
+                f"• 前阳被后阴完全吞没，吞没强度: {engulf_strength:.2f}\n"
+                f"• 成交量放大{volume_ratio:.1f}倍\n"
+                f"• RSI({rsi:.1f})偏高，有回调压力\n"
+                f"{div_text}{decl_text}"
+                f"• 建议在${entry_main:.4f}附近做空"
+            )
+
+        risk_reward = round(reward / risk, 2) if risk > 0 else 0
+        return {
+            'symbol': symbol,
+            'pattern': 'CONFIRMATION_K',
+            'direction': direction,
+            'rsi': round(float(rsi), 1),
+            'volume_ratio': round(volume_ratio, 2),
+            'score': int(score),
+            'current_price': round(price, 4),
+            'signal_time': datetime.now(),
+            'reason': reason,
+            'entry_points': {
+                'main_entry': round(entry_main, 6),
+                'stop_loss': round(stop_loss, 6),
+                'take_profit1': round(take_profit1, 6),
+                'take_profit2': round(take_profit2, 6),
+                'risk_reward': risk_reward
+            }
+        }
+
+    # 以下为原有信号创建函数（略，保持原样）
     def _create_bounce_signal(self, symbol, data, price, rsi, volume_ratio, ma20, score):
         recent_low = data['low'].rolling(20).min().iloc[-1]
         entry_main = price * 0.998
@@ -456,7 +552,6 @@ class SignalChecker:
         risk = entry_main - stop_loss
         reward = take_profit2 - entry_main
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
-
         return {
             'symbol': symbol,
             'pattern': 'BOUNCE',
@@ -466,11 +561,7 @@ class SignalChecker:
             'score': int(score),
             'current_price': round(price, 4),
             'signal_time': datetime.now(),
-            'reason': f"🟢 <b>超卖反弹机会</b>\n\n"
-                     f"• RSI({rsi:.1f})进入超卖区域\n"
-                     f"• 成交量放大{volume_ratio:.1f}倍\n"
-                     f"• 价格${price:.4f}接近近期低点${recent_low:.4f}\n"
-                     f"• 建议在${entry_main:.4f}附近分批买入",
+            'reason': f"🟢 <b>超卖反弹机会</b>\n\n• RSI({rsi:.1f})进入超卖\n• 成交量放大{volume_ratio:.1f}倍\n• 价格${price:.4f}接近低点${recent_low:.4f}\n• 建议在${entry_main:.4f}附近买入",
             'entry_points': {
                 'main_entry': round(entry_main, 6),
                 'stop_loss': round(stop_loss, 6),
@@ -489,7 +580,6 @@ class SignalChecker:
         risk = entry_main - stop_loss
         reward = take_profit2 - entry_main
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
-
         return {
             'symbol': symbol,
             'pattern': 'CALLBACK',
@@ -499,11 +589,7 @@ class SignalChecker:
             'score': int(score),
             'current_price': round(price, 4),
             'signal_time': datetime.now(),
-            'reason': f"🔄 <b>健康回调机会</b>\n\n"
-                     f"• 从高点${recent_high:.4f}回调{callback_pct:.1f}%\n"
-                     f"• RSI({rsi:.1f})回调至理想区域\n"
-                     f"• 价格在MA20(${ma20:.4f})上方获得支撑\n"
-                     f"• 建议在${entry_main:.4f}附近分批建仓",
+            'reason': f"🔄 <b>健康回调机会</b>\n\n• 从高点${recent_high:.4f}回调{callback_pct:.1f}%\n• RSI({rsi:.1f})理想\n• 价格在MA20(${ma20:.4f})上方\n• 建议在${entry_main:.4f}附近建仓",
             'entry_points': {
                 'main_entry': round(entry_main, 6),
                 'stop_loss': round(stop_loss, 6),
@@ -522,7 +608,6 @@ class SignalChecker:
         risk = entry_main - stop_loss
         reward = take_profit2 - entry_main
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
-
         return {
             'symbol': symbol,
             'pattern': 'CALLBACK_CONFIRM_K',
@@ -532,13 +617,7 @@ class SignalChecker:
             'score': int(score),
             'current_price': round(price, 4),
             'signal_time': datetime.now(),
-            'reason': f"🚀 <b>回调确认转强信号</b>\n\n"
-                     f"• 健康回调{callback_pct:.1f}%后确认转强\n"
-                     f"• RSI({rsi:.1f})重新进入强势区间\n"
-                     f"• 成交量显著放大{volume_ratio:.1f}倍\n"
-                     f"• 均线多头排列(MA20>MA50)\n"
-                     f"• 趋势可能进入加速阶段\n"
-                     f"• 建议在${entry_main:.4f}附近果断买入",
+            'reason': f"🚀 <b>回调确认转强</b>\n\n• 回调{callback_pct:.1f}%后转强\n• RSI({rsi:.1f})强势\n• 成交量{volume_ratio:.1f}倍\n• 均线多头\n• 建议${entry_main:.4f}买入",
             'entry_points': {
                 'main_entry': round(entry_main, 6),
                 'stop_loss': round(stop_loss, 6),
@@ -557,7 +636,6 @@ class SignalChecker:
         risk = stop_loss - entry_main
         reward = entry_main - take_profit2
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
-
         return {
             'symbol': symbol,
             'pattern': 'TREND_EXHAUSTION',
@@ -567,69 +645,7 @@ class SignalChecker:
             'score': int(score),
             'current_price': round(price, 4),
             'signal_time': datetime.now(),
-            'reason': f"🔴 <b>趋势衰竭做空机会</b>\n\n"
-                     f"• RSI({rsi:.1f})严重超买\n"
-                     f"• 上涨成交量萎缩({volume_ratio:.1f}x)\n"
-                     f"• 价格${price:.4f}远离MA20(${ma20:.4f})\n"
-                     f"• 存在回调风险\n"
-                     f"• 建议在${entry_main:.4f}附近做空",
-            'entry_points': {
-                'main_entry': round(entry_main, 6),
-                'stop_loss': round(stop_loss, 6),
-                'take_profit1': round(take_profit1, 6),
-                'take_profit2': round(take_profit2, 6),
-                'risk_reward': risk_reward
-            }
-        }
-
-    def _create_confirmation_k_signal(self, symbol, data, price, rsi, volume_ratio,
-                                      ma20, ma50, direction, engulf_strength, score):
-        # 计算止损止盈（根据方向）
-        if direction == 'BUY':
-            recent_low = data['low'].rolling(10).min().iloc[-1]
-            entry_main = price * 1.002  # 略高于现价，确认突破
-            stop_loss = recent_low * 0.985
-            take_profit1 = price * 1.04
-            take_profit2 = price * 1.08
-            risk = entry_main - stop_loss
-            reward = take_profit2 - entry_main
-            reason = (
-                f"🟢 <b>看涨吞没形态确认</b>\n\n"
-                f"• 前一根阴线被当前阳线完全吞没\n"
-                f"• 吞没强度: {engulf_strength:.2f}\n"
-                f"• 成交量放大{volume_ratio:.1f}倍\n"
-                f"• RSI({rsi:.1f})处于合理区域\n"
-                f"• 建议在${entry_main:.4f}附近买入"
-            )
-        else:  # SELL
-            recent_high = data['high'].rolling(10).max().iloc[-1]
-            entry_main = price * 0.998  # 略低于现价
-            stop_loss = recent_high * 1.02
-            take_profit1 = price * 0.96
-            take_profit2 = price * 0.93
-            risk = stop_loss - entry_main
-            reward = entry_main - take_profit2
-            reason = (
-                f"🔴 <b>看跌吞没形态确认</b>\n\n"
-                f"• 前一根阳线被当前阴线完全吞没\n"
-                f"• 吞没强度: {engulf_strength:.2f}\n"
-                f"• 成交量放大{volume_ratio:.1f}倍\n"
-                f"• RSI({rsi:.1f})偏高，有回调压力\n"
-                f"• 建议在${entry_main:.4f}附近做空"
-            )
-
-        risk_reward = round(reward / risk, 2) if risk > 0 else 0
-
-        return {
-            'symbol': symbol,
-            'pattern': 'CONFIRMATION_K',
-            'direction': direction,
-            'rsi': round(float(rsi), 1),
-            'volume_ratio': round(volume_ratio, 2),
-            'score': int(score),
-            'current_price': round(price, 4),
-            'signal_time': datetime.now(),
-            'reason': reason,
+            'reason': f"🔴 <b>趋势衰竭做空</b>\n\n• RSI({rsi:.1f})超买\n• 成交量萎缩{volume_ratio:.1f}x\n• 价格远离MA20\n• 建议${entry_main:.4f}做空",
             'entry_points': {
                 'main_entry': round(entry_main, 6),
                 'stop_loss': round(stop_loss, 6),
@@ -670,9 +686,8 @@ class TelegramNotifier:
 
     def send_signal(self, signal, cooldown_reason=""):
         if not self.bot:
-            # 无 Telegram 时，将信号打印到控制台（便于测试）
             print(f"\n📨 [模拟发送] {signal['symbol']} - {signal['pattern']} ({signal['score']}分)")
-            return False
+            return True   # 模拟成功，记录冷却（便于测试）
         try:
             message = self._format_signal_message(signal, cooldown_reason)
             self.bot.send_message(
@@ -690,12 +705,8 @@ class TelegramNotifier:
     def _format_signal_message(self, signal, cooldown_reason=""):
         direction_emoji = "🟢" if signal['direction'] == 'BUY' else "🔴"
         pattern_emoji = {
-            'BOUNCE': '🔺',
-            'BREAKOUT': '⚡',
-            'CALLBACK': '🔄',
-            'CALLBACK_CONFIRM_K': '🚀',
-            'CONFIRMATION_K': '🔰',
-            'TREND_EXHAUSTION': '📉'
+            'BOUNCE': '🔺', 'BREAKOUT': '⚡', 'CALLBACK': '🔄',
+            'CALLBACK_CONFIRM_K': '🚀', 'CONFIRMATION_K': '🔰', 'TREND_EXHAUSTION': '📉'
         }.get(signal['pattern'], '💰')
         entry = signal['entry_points']
         return f"""
@@ -728,11 +739,11 @@ class TelegramNotifier:
 <code>═══════════════════════════</code>
 """
 
-# ============ 交易系统主类（单次运行）============
+# ============ 交易系统主类 ============
 class UltimateTradingSystem:
     def __init__(self):
         print("\n" + "="*60)
-        print("🚀 终极智能交易系统 v33.9 - 正式版（含吞没形态，无TA-Lib）")
+        print("🚀 终极智能交易系统 v34.0 - 吞没+背离+MACD柱")
         print("="*60)
         self.data_fetcher = OKXDataFetcher()
         self.cooldown_manager = CooldownManager()
@@ -781,8 +792,8 @@ class UltimateTradingSystem:
     def _process_signals(self, signals):
         print(f"\n📨 准备发送 {len(signals)} 个交易信号...")
         signals.sort(key=lambda x: x.get('score', 0), reverse=True)
-        max_signals_to_send = min(5, len(signals))
-        top_signals = signals[:max_signals_to_send]
+        max_to_send = min(UltimateConfig.MAX_SIGNALS_TO_SEND, len(signals))
+        top_signals = signals[:max_to_send]
 
         sent_count = 0
         for i, signal in enumerate(top_signals, 1):
@@ -798,7 +809,6 @@ class UltimateTradingSystem:
                 print(f"   ⚠️ 冷却阻止: {cooldown_reason}")
                 continue
 
-            # 即使 Telegram 未启用，也尝试发送（内部会打印模拟信息）
             success = self.telegram.send_signal(signal, cooldown_reason)
             if success:
                 self.cooldown_manager.record_signal(
@@ -818,12 +828,12 @@ class UltimateTradingSystem:
 # ============ 主程序入口 ============
 def main():
     print("="*60)
-    print("🤖 终极智能交易系统 v33.9 - GitHub Actions 正式版（无TA-Lib）")
+    print("🤖 终极智能交易系统 v34.0 - GitHub Actions 版")
     print("="*60)
     print(f"📅 版本: {UltimateConfig.VERSION}")
     print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📊 监控币种: {len(MONITOR_COINS)}个")
-    print(f"🎯 信号模式: 5种优化策略（含吞没形态 CONFIRMATION_K）")
+    print(f"🎯 信号模式: 5种策略 + 增强型吞没(背离/MACD)")
     print("="*60)
 
     try:
