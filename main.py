@@ -853,9 +853,8 @@ class TelegramNotifier:
         }.get(signal['pattern'], '💰')
         entry = signal['entry_points']
         return f"""
-<code>═══════════════════════════</code>
-🚀 <b>实盘交易信号</b>
-<code>═══════════════════════════</code>
+        
+ <b>🚀实盘交易信号</b>
 
 <b>🎯 交易对:</b> {signal['symbol']}/USDT
 <b>📊 模式:</b> {signal['pattern']} {pattern_emoji}
