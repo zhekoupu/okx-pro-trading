@@ -110,7 +110,7 @@ class UltimateConfig:
     # ----- ADX市场过滤（阈值提高至35，减少误杀）-----
     ADX_CONFIG = {
         'period': 14,
-        'trend_threshold': 25,      # 原25，提高至35，仅极强趋势才过滤
+        'trend_threshold': 20,      # 原25，提高至35，仅极强趋势才过滤
         'enabled': True
     }
 
