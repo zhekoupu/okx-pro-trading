@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v34.8 正式版
-改进：EMA斜率多周期判断 + 复用趋势模式避免重复计算
+终极智能交易系统 v34.9 正式版
+改进：EMA斜率标准化 + 结合EMA20/50趋势结构 + 多周期趋势共振
 适用于 GitHub Actions 定时运行，单次分析后退出
 """
 
@@ -52,7 +52,7 @@ print(f"📊 监控币种列表: {len(MONITOR_COINS)} 个币种")
 
 # ============ 配置类 ============
 class UltimateConfig:
-    VERSION = "34.8-正式版（EMA多周期斜率+复用趋势模式）"
+    VERSION = "34.9-正式版（多周期趋势共振）"
     MAX_SIGNALS_TO_SEND = 3
     TELEGRAM_RETRY = 3
     TELEGRAM_RETRY_DELAY = 1
@@ -111,7 +111,13 @@ class UltimateConfig:
     TREND_MATCH_SCORE = 1.0      # 顺趋势
     TREND_MISMATCH_SCORE = 0.2   # 逆趋势
     TREND_NEUTRAL_SCORE = 0.5    # 无明显趋势方向时的中间分
-    MIN_TREND_SLOPE_PERCENT = 0.001  # 最小斜率阈值 0.1%
+    MIN_TREND_SLOPE_PERCENT = 0.001  # 最小斜率阈值 0.1% (每根K线)
+    
+    # 多周期趋势共振权重
+    TREND_15M_WEIGHT = 0.6
+    TREND_1H_WEIGHT = 0.4
+    TREND_CONFIRM_BOOST = 1.2    # 方向一致时的乘数
+    TREND_CONFLICT_PENALTY = 0.8  # 方向冲突时的乘数
     
     # 背离复合强度系数
     DIVERGENCE_WEIGHTS = {
@@ -467,48 +473,92 @@ class SignalChecker:
         else:
             return 'TREND'
 
-    # ---------- 趋势方向匹配评分（改进：多周期斜率） ----------
-    def _get_trend_score(self, data: pd.DataFrame, signal_direction: str, trend_mode: str) -> float:
+    # ---------- 趋势信息（得分 + 方向） ----------
+    def _get_trend_info(self, data: pd.DataFrame, signal_direction: str) -> Tuple[float, int]:
         """
-        根据趋势模式和信号方向返回趋势维度的得分（0~1）
-        在TREND模式下，使用EMA20的多周期斜率判断趋势方向，避免单根K线干扰
+        返回 (score, direction)
+        direction: 1=向上, -1=向下, 0=无明确方向
         """
+        trend_mode = self._get_trend_mode(data)
+        
         if trend_mode == 'RANGE':
-            return 0.3
+            return UltimateConfig.TREND_NEUTRAL_SCORE, 0
         elif trend_mode == 'TRANSITION':
-            return 0.6
+            return 0.6, 0  # 过渡期方向不明确
         
         # TREND模式
         ema20 = TechnicalIndicators.calculate_ema(data, 20)
-        if len(ema20) < 4:  # 至少需要4个点才能计算跨越3根的斜率
-            # 数据不足，回退到单根斜率
-            if len(ema20) < 2:
-                return UltimateConfig.TREND_NEUTRAL_SCORE
-            ema20_current = ema20.iloc[-1]
-            ema20_prev = ema20.iloc[-2]
-            slope_ratio = (ema20_current - ema20_prev) / ema20_prev
+        ema50 = TechnicalIndicators.calculate_ema(data, 50)
+        
+        if len(ema20) < 4 or len(ema50) < 2:
+            return UltimateConfig.TREND_NEUTRAL_SCORE, 0
+        
+        ema20_current = ema20.iloc[-1]
+        ema20_prev3 = ema20.iloc[-4]  # 跨越3根K线
+        slope_per_bar = (ema20_current - ema20_prev3) / ema20_prev3 / 3
+        ema50_current = ema50.iloc[-1]
+        
+        # 判断结构方向 (EMA20与EMA50关系)
+        if ema20_current > ema50_current:
+            structure_up = True
+            structure_down = False
+        elif ema20_current < ema50_current:
+            structure_up = False
+            structure_down = True
         else:
-            # 使用当前EMA20与3根前的EMA20比较（跨越3根K线）
-            ema20_current = ema20.iloc[-1]
-            ema20_prev3 = ema20.iloc[-4]  # -4到-1跨越3根
-            slope_ratio = (ema20_current - ema20_prev3) / ema20_prev3
+            structure_up = structure_down = False
         
-        min_slope = UltimateConfig.MIN_TREND_SLOPE_PERCENT
+        # 判断斜率方向
+        slope_up = slope_per_bar > UltimateConfig.MIN_TREND_SLOPE_PERCENT
+        slope_down = slope_per_bar < -UltimateConfig.MIN_TREND_SLOPE_PERCENT
         
-        if slope_ratio > min_slope:
+        # 综合趋势方向：优先使用结构方向，若无结构则使用斜率
+        if structure_up:
             trend_up = True
             trend_down = False
-        elif slope_ratio < -min_slope:
+        elif structure_down:
             trend_up = False
             trend_down = True
         else:
-            # 斜率太小，视为无明显趋势方向
-            return UltimateConfig.TREND_NEUTRAL_SCORE
+            trend_up = slope_up
+            trend_down = slope_down
         
+        # 无明确方向
+        if not (trend_up or trend_down):
+            return UltimateConfig.TREND_NEUTRAL_SCORE, 0
+        
+        # 计算匹配得分
         if (signal_direction == 'BUY' and trend_up) or (signal_direction == 'SELL' and trend_down):
-            return UltimateConfig.TREND_MATCH_SCORE
+            base_score = UltimateConfig.TREND_MATCH_SCORE
         else:
-            return UltimateConfig.TREND_MISMATCH_SCORE
+            base_score = UltimateConfig.TREND_MISMATCH_SCORE
+        
+        # 动能不足惩罚
+        if not (slope_up or slope_down):
+            base_score *= 0.7
+        
+        score = max(0.0, min(base_score, 1.0))
+        direction = 1 if trend_up else -1 if trend_down else 0
+        return score, direction
+
+    # ---------- 多周期趋势得分组合 ----------
+    def _get_trend_score_combined(self, data_15m: pd.DataFrame, data_1h: pd.DataFrame, signal_direction: str) -> float:
+        """结合15分钟和1小时周期的趋势得分"""
+        score_15m, dir_15m = self._get_trend_info(data_15m, signal_direction)
+        score_1h, dir_1h = self._get_trend_info(data_1h, signal_direction)
+        
+        # 加权平均
+        combined = (score_15m * UltimateConfig.TREND_15M_WEIGHT + 
+                    score_1h * UltimateConfig.TREND_1H_WEIGHT)
+        
+        # 方向一致性调整
+        if dir_15m != 0 and dir_1h != 0:
+            if dir_15m == dir_1h:
+                combined *= UltimateConfig.TREND_CONFIRM_BOOST
+            else:
+                combined *= UltimateConfig.TREND_CONFLICT_PENALTY
+        
+        return min(combined, 1.0)
 
     # ---------- 趋势模式过滤 ----------
     def _is_signal_allowed(self, pattern: str, trend_mode: str) -> bool:
@@ -538,15 +588,11 @@ class SignalChecker:
             return 'SELL', strength
         return '', 0.0
 
-    # ---------- 增强版 CONFIRMATION_K 评分（复用trend_mode参数）----------
+    # ---------- 增强版 CONFIRMATION_K 评分（使用多周期趋势）----------
     def _calculate_confirmation_k_score_advanced(self, direction: str, rsi: float, volume_ratio: float,
                                                  engulf_strength: float, div_info: tuple, decline_info: tuple,
-                                                 data: pd.DataFrame, macd_df: pd.DataFrame,
-                                                 trend_mode: str = None) -> int:
-        """
-        基于四个维度的加权评分
-        若传入trend_mode则直接使用，避免重复计算ADX
-        """
+                                                 data_15m: pd.DataFrame, data_1h: pd.DataFrame,
+                                                 macd_df: pd.DataFrame) -> int:
         # 1. 结构强度 (40%)
         div_type, div_str = div_info
         structure = 0.0
@@ -576,10 +622,8 @@ class SignalChecker:
         # 3. 量能确认 (15%)
         volume = min(volume_ratio / 2.0, 1.0)
         
-        # 4. 趋势匹配 (20%) —— 使用传入的trend_mode（若未提供则计算）
-        if trend_mode is None:
-            trend_mode = self._get_trend_mode(data)
-        trend_score = self._get_trend_score(data, direction, trend_mode)
+        # 4. 趋势匹配 (20%) —— 使用多周期趋势得分
+        trend_score = self._get_trend_score_combined(data_15m, data_1h, direction)
         
         w = UltimateConfig.CONFIRMATION_K_WEIGHTS
         total = (structure * w['structure'] +
@@ -597,10 +641,11 @@ class SignalChecker:
 
         for symbol, data_dict in coins_data.items():
             try:
-                if '15m' not in data_dict:
+                if '15m' not in data_dict or '1H' not in data_dict:
                     continue
                 data_15m = data_dict['15m']
-                if len(data_15m) < 30:
+                data_1h = data_dict['1H']
+                if len(data_15m) < 30 or len(data_1h) < 30:
                     continue
 
                 current_price = data_15m['close'].iloc[-1]
@@ -665,8 +710,7 @@ class SignalChecker:
                     
                     score = self._calculate_confirmation_k_score_advanced(
                         engulf_dir, rsi, volume_ratio, engulf_strength,
-                        div_info, decline_info, data_15m, macd_df,
-                        trend_mode=trend_mode  # 传入已计算的趋势模式
+                        div_info, decline_info, data_15m, data_1h, macd_df
                     )
                     
                     if score >= self.thresholds['CONFIRMATION_K']:
@@ -1088,7 +1132,7 @@ def main():
     print(f"📅 版本: {UltimateConfig.VERSION}")
     print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📊 监控币种: {len(MONITOR_COINS)}个")
-    print(f"🎯 信号模式: 5种策略 + 增强型吞没(复合背离/方向MACD/动态冷却/ATR/趋势增强/方向冷却/多周期斜率)")
+    print(f"🎯 信号模式: 5种策略 + 增强型吞没(复合背离/方向MACD/动态冷却/ATR/趋势增强/方向冷却/多周期共振)")
     print("="*60)
 
     try:
