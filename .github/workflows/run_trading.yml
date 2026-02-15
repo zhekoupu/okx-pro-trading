@@ -2,7 +2,7 @@ name: Trading bot
 
 on:
   schedule:
-    - cron: '*/45 * * * *'   # 每45分钟运行一次
+    - cron: '*/245 * * * *'   # 每45分钟运行一次
   workflow_dispatch:          # 允许手动触发
 
 jobs:
