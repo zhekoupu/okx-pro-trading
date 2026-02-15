@@ -852,11 +852,8 @@ class TelegramNotifier:
             'CALLBACK_CONFIRM_K': '🚀', 'CONFIRMATION_K': '🔰', 'TREND_EXHAUSTION': '📉'
         }.get(signal['pattern'], '💰')
         entry = signal['entry_points']
-        return f"""
-<code>═══════════════════════════</code>
+        
 🚀 <b>实盘交易信号</b>
-<code>═══════════════════════════</code>
-
 <b>🎯 交易对:</b> {signal['symbol']}/USDT
 <b>📊 模式:</b> {signal['pattern']} {pattern_emoji}
 <b>📈 方向:</b> {signal['direction']} {direction_emoji}
