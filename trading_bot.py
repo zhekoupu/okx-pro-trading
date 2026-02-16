@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v36.7 正式版（最终修复版）
-改进：动态阈值 + 观察池延迟确认 + 高分豁免冷却 + ATR最小百分比 + 历史胜率加权
+终极智能交易系统 v36.8 正式版（趋势衰竭优化版）
+改进：增加1小时趋势方向过滤 + RSI下降加分，减少逆势做空信号
 适用于 GitHub Actions 定时运行，单次分析后退出
 """
 
@@ -60,7 +60,7 @@ class DateTimeEncoder(json.JSONEncoder):
 
 # ============ 配置类 ============
 class UltimateConfig:
-    VERSION = "36.7-正式版（动态阈值+观察池+高分豁免+最小止盈+胜率加权）"
+    VERSION = "36.8-正式版（趋势衰竭优化版：1h方向过滤+RSI下降加分）"
     MAX_SIGNALS_TO_SEND = 3
     TELEGRAM_RETRY = 3
     TELEGRAM_RETRY_DELAY = 1
@@ -482,7 +482,7 @@ class TechnicalIndicators:
         return atr.fillna(method='bfill').fillna(0)
 
 
-# ============ 信号检查器（v36.7）============
+# ============ 信号检查器（v36.8）============
 class SignalChecker:
     def __init__(self):
         self.base_thresholds = UltimateConfig.BASE_SIGNAL_THRESHOLDS
@@ -853,13 +853,26 @@ class SignalChecker:
                                         ))
                                         signal_counts['CALLBACK_CONFIRM_K'] += 1
 
-                # 趋势衰竭做空信号
+                # 趋势衰竭做空信号（优化版：1h趋势过滤 + RSI下降加分）
                 if rsi > self.params['trend_exhaustion_rsi_min'] and volume_ratio < 1.0:
                     if self._is_signal_allowed('TREND_EXHAUSTION', trend_mode):
+                        # 获取1小时趋势方向，如果为上升趋势（方向1），则跳过做空信号
+                        trend_dir_1h = self._get_trend_direction(data_1h)
+                        if trend_dir_1h == 1:  # 1小时上升趋势，不产生做空信号
+                            continue
+
+                        # 计算RSI下降加分（RSI比前一根低）
+                        rsi_series = TechnicalIndicators.calculate_rsi(data_15m, 14)
+                        rsi_prev = rsi_series.iloc[-2] if len(rsi_series) >= 2 else rsi
+                        if rsi < rsi_prev:
+                            rsi_boost = 8  # RSI下降加分
+                        else:
+                            rsi_boost = 0
+
                         allowed, penalty = self._check_1h_structure(data_1h, 'SELL')
                         if allowed:
                             raw_score = self._calculate_trend_exhaustion_score(rsi, volume_ratio)
-                            raw_score = int(raw_score * penalty)
+                            raw_score = int(raw_score * penalty) + rsi_boost
                             raw_score = self._apply_success_rate_weight(symbol, 'TREND_EXHAUSTION', raw_score)
                             dynamic_th = self._get_dynamic_threshold('TREND_EXHAUSTION', data_15m, current_price)
                             if raw_score >= dynamic_th:
@@ -1344,7 +1357,7 @@ def main():
     print(f"📅 版本: {UltimateConfig.VERSION}")
     print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📊 监控币种: {len(MONITOR_COINS)}个")
-    print(f"🎯 信号模式: 5种策略 + 增强型吞没(动态阈值/观察池/高分豁免/最小止盈/胜率加权)")
+    print(f"🎯 信号模式: 5种策略 + 增强型吞没(动态阈值/观察池/高分豁免/最小止盈/胜率加权) + 趋势衰竭优化")
     print("=" * 60)
 
     try:
