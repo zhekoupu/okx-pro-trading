@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v36.9 正式版（修复JSON序列化错误）
+终极智能交易系统 v36.12 正式版（完整修复所有截断，确保语法完整）
 改进：动态阈值 + 观察池延迟确认 + 高分豁免冷却 + ATR最小百分比 + 历史胜率加权 + 趋势衰竭优化
 适用于 GitHub Actions 定时运行，单次分析后退出
 """
@@ -66,7 +66,7 @@ class DateTimeEncoder(json.JSONEncoder):
 
 # ============ 配置类 ============
 class UltimateConfig:
-    VERSION = "36.9-正式版（修复JSON序列化错误）"
+    VERSION = "36.12-正式版（完整修复所有截断）"
     MAX_SIGNALS_TO_SEND = 3
     TELEGRAM_RETRY = 3
     TELEGRAM_RETRY_DELAY = 1
@@ -488,7 +488,7 @@ class TechnicalIndicators:
         return atr.fillna(method='bfill').fillna(0)
 
 
-# ============ 信号检查器（v36.9）============
+# ============ 信号检查器（v36.12）============
 class SignalChecker:
     def __init__(self):
         self.base_thresholds = UltimateConfig.BASE_SIGNAL_THRESHOLDS
@@ -1121,6 +1121,7 @@ class SignalChecker:
         risk = entry_main - stop_loss
         reward = take_profit2 - entry_main
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
+
         return {
             'symbol': symbol,
             'pattern': 'CALLBACK_CONFIRM_K',
@@ -1130,7 +1131,14 @@ class SignalChecker:
             'score': int(score),
             'current_price': round(price, 4),
             'signal_time': datetime.now(),
-            'reason': f"🚀 <b>回调确认转强</b>\n\n• 回调{callback_pct:.1f}%后转强\n• RSI({rsi:.1f})强势\n• 成交量{volume_ratio:.1f}倍\n• 均线多头\n• 建议${entry_main:.4f}买入",
+            'reason': (
+                f"🟢 <b>回调确认转强</b>\n\n"
+                f"• 从高点${recent_high:.4f}回调{callback_pct:.1f}%\n"
+                f"• RSI({rsi:.1f})处于强势区\n"
+                f"• 成交量{volume_ratio:.1f}倍\n"
+                f"• MA20(${ma20:.4f}) > MA50(${ma50:.4f})\n"
+                f"• 建议在${entry_main:.4f}附近建仓"
+            ),
             'entry_points': {
                 'main_entry': round(entry_main, 6),
                 'stop_loss': round(stop_loss, 6),
