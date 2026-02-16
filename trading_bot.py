@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v35.6 正式版（最终修复版）
+终极智能交易系统 v36.7 正式版（最终修复版）
 改进：动态阈值 + 观察池延迟确认 + 高分豁免冷却 + ATR最小百分比 + 历史胜率加权
 适用于 GitHub Actions 定时运行，单次分析后退出
 """
@@ -60,7 +60,7 @@ class DateTimeEncoder(json.JSONEncoder):
 
 # ============ 配置类 ============
 class UltimateConfig:
-    VERSION = "35.6-正式版（动态阈值+观察池+高分豁免+最小止盈+胜率加权）"
+    VERSION = "36.7-正式版（动态阈值+观察池+高分豁免+最小止盈+胜率加权）"
     MAX_SIGNALS_TO_SEND = 3
     TELEGRAM_RETRY = 3
     TELEGRAM_RETRY_DELAY = 1
@@ -482,7 +482,7 @@ class TechnicalIndicators:
         return atr.fillna(method='bfill').fillna(0)
 
 
-# ============ 信号检查器（v35.6）============
+# ============ 信号检查器（v36.7）============
 class SignalChecker:
     def __init__(self):
         self.base_thresholds = UltimateConfig.BASE_SIGNAL_THRESHOLDS
@@ -1062,7 +1062,8 @@ class SignalChecker:
             'trend_mode': trend_mode
         }
 
-    def _create_callback_signal(self, symbol, data, price, rsi, volume_ratio, recent_high, callback_pct, ma20, score,
+    def _create_callback_signal(self, symbol, data, price, rsi, volume_ratio,
+                                recent_high, callback_pct, ma20, score,
                                 trend_direction, trend_mode):
         entry_main, stop_loss, take_profit1, take_profit2 = self._calculate_stop_loss(
             data, price, 'BUY', trend_direction, trend_mode
@@ -1091,7 +1092,9 @@ class SignalChecker:
             'trend_mode': trend_mode
         }
 
-    def _create_callback_confirm_signal(self, symbol, data, price, rsi, volume_ratio, recent_high, callback_pct, ma20, ma50, score,
+    def _create_callback_confirm_signal(self, symbol, data, price, rsi,
+                                        volume_ratio, recent_high, callback_pct,
+                                        ma20, ma50, score,
                                         trend_direction, trend_mode):
         entry_main, stop_loss, take_profit1, take_profit2 = self._calculate_stop_loss(
             data, price, 'BUY', trend_direction, trend_mode
@@ -1120,7 +1123,8 @@ class SignalChecker:
             'trend_mode': trend_mode
         }
 
-    def _create_trend_exhaustion_signal(self, symbol, data, price, rsi, volume_ratio, ma20, score,
+    def _create_trend_exhaustion_signal(self, symbol, data, price,
+                                        rsi, volume_ratio, ma20, score,
                                         trend_direction, trend_mode):
         entry_main, stop_loss, take_profit1, take_profit2 = self._calculate_stop_loss(
             data, price, 'SELL', trend_direction, trend_mode
