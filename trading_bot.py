@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v36.8 正式版（趋势衰竭优化版）
-改进：增加1小时趋势方向过滤 + RSI下降加分，减少逆势做空信号
+终极智能交易系统 v36.9 正式版（修复JSON序列化错误）
+改进：动态阈值 + 观察池延迟确认 + 高分豁免冷却 + ATR最小百分比 + 历史胜率加权 + 趋势衰竭优化
 适用于 GitHub Actions 定时运行，单次分析后退出
 """
 
@@ -51,16 +51,22 @@ MONITOR_COINS = [
 
 print(f"📊 监控币种列表: {len(MONITOR_COINS)} 个币种")
 
-# ============ 自定义 JSON 编码器（处理 datetime）============
+# ============ 自定义 JSON 编码器（处理 datetime 和 numpy 类型）============
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, datetime):
             return obj.isoformat()
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
         return super().default(obj)
 
 # ============ 配置类 ============
 class UltimateConfig:
-    VERSION = "36.8-正式版（趋势衰竭优化版：1h方向过滤+RSI下降加分）"
+    VERSION = "36.9-正式版（修复JSON序列化错误）"
     MAX_SIGNALS_TO_SEND = 3
     TELEGRAM_RETRY = 3
     TELEGRAM_RETRY_DELAY = 1
@@ -208,7 +214,7 @@ def load_observation_pool():
 
 
 def save_observation_pool(pool):
-    """保存观察池，使用自定义编码器自动处理datetime"""
+    """保存观察池，使用自定义编码器自动处理datetime和numpy类型"""
     with open(UltimateConfig.OBSERVATION_POOL_FILE, 'w') as f:
         json.dump(pool, f, indent=2, cls=DateTimeEncoder)
 
@@ -482,7 +488,7 @@ class TechnicalIndicators:
         return atr.fillna(method='bfill').fillna(0)
 
 
-# ============ 信号检查器（v36.8）============
+# ============ 信号检查器（v36.9）============
 class SignalChecker:
     def __init__(self):
         self.base_thresholds = UltimateConfig.BASE_SIGNAL_THRESHOLDS
