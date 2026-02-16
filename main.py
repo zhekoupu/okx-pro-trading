@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v35.2 正式版
-改进：结构判定强化 + 综合ADX + 强趋势止损收紧 + 冷却模式感知
+终极智能交易系统 v35.3 正式版
+改进：统一ATR风控 + 趋势冲突惩罚强化 + TRANSITION得分下调
 适用于 GitHub Actions 定时运行，单次分析后退出
 """
 
@@ -52,7 +52,7 @@ print(f"📊 监控币种列表: {len(MONITOR_COINS)} 个币种")
 
 # ============ 配置类 ============
 class UltimateConfig:
-    VERSION = "35.2-正式版（综合ADX+趋势强化+冷却模式感知）"
+    VERSION = "35.3-正式版（统一ATR风控+趋势冲突强化）"
     MAX_SIGNALS_TO_SEND = 3
     TELEGRAM_RETRY = 3
     TELEGRAM_RETRY_DELAY = 1
@@ -118,7 +118,8 @@ class UltimateConfig:
     TREND_MATCH_SCORE = 1.0
     TREND_MISMATCH_SCORE = 0.2
     TREND_NEUTRAL_SCORE = 0.5
-    TREND_CONFLICT_PENALTY = 0.5     # 方向不一致时的惩罚乘数
+    TRANSITION_BASE_SCORE = 0.4      # 过渡期基础得分（原为0.6）
+    TREND_CONFLICT_PENALTY = 0.3      # 方向不一致时的惩罚乘数（原0.5）
     
     # 多周期趋势硬性过滤开关
     ENFORCE_1H_STRUCTURE = True
@@ -146,7 +147,7 @@ class UltimateConfig:
     # ATR 止盈倍数（第一/第二目标）
     ATR_TAKE_PROFIT1_MULTIPLIER = 2.0
     ATR_TAKE_PROFIT2_MULTIPLIER = 3.0
-    # 最大止损距离百分比
+    # 最大止损距离百分比（作为ATR的补充限制）
     MAX_STOP_PERCENT = 0.06
 
     # 趋势模式与信号类型的匹配规则
@@ -206,14 +207,12 @@ class CooldownManager:
         now = datetime.now()
         key = self._get_key(symbol, direction)
         
-        # 先检查同方向冷却
         if key in self.cooldown_db:
             last_signal = self.cooldown_db[key]
             last_time = last_signal['time']
             cooldown_minutes = last_signal.get('cooldown_minutes', self.config['same_coin_cooldown'])
             elapsed = (now - last_time).total_seconds() / 60
             
-            # 趋势反转豁免：如果当前趋势方向与上次信号时的趋势方向相反，且趋势方向非中性，则允许通过
             last_trend_dir = last_signal.get('trend_direction', 0)
             last_trend_mode = last_signal.get('trend_mode', 'RANGE')
             
@@ -258,7 +257,6 @@ class CooldownManager:
             'pattern': pattern,
             'score': score
         })
-        # 更新趋势状态
         if trend_direction != 0 or trend_mode != 'RANGE':
             self.trend_state[symbol] = {'direction': trend_direction, 'mode': trend_mode, 'time': now}
 
@@ -425,7 +423,7 @@ class TechnicalIndicators:
         atr = tr.ewm(alpha=alpha, adjust=False).mean()
         return atr.fillna(method='bfill').fillna(0)
 
-# ============ 信号检查器（v35.2增强版）============
+# ============ 信号检查器（v35.3 统一ATR风控）============
 class SignalChecker:
     def __init__(self):
         self.thresholds = UltimateConfig.SIGNAL_THRESHOLDS
@@ -513,12 +511,10 @@ class SignalChecker:
         
         return False, 0.0
 
-    # ---------- 综合趋势模式（基于15m和1H的ADX加权）----------
+    # ---------- 综合趋势模式 ----------
     def _get_combined_trend_mode(self, data_15m: pd.DataFrame, data_1h: pd.DataFrame) -> str:
-        """返回综合趋势模式：RANGE / TRANSITION / TREND"""
         adx_15m = TechnicalIndicators.calculate_adx(data_15m).iloc[-1]
         adx_1h = TechnicalIndicators.calculate_adx(data_1h).iloc[-1]
-        # 加权平均，15m权重0.6，1h权重0.4
         combined_adx = adx_15m * 0.6 + adx_1h * 0.4
         if combined_adx <= UltimateConfig.TREND_MODES['RANGE']:
             return 'RANGE'
@@ -527,12 +523,8 @@ class SignalChecker:
         else:
             return 'TREND'
 
-    # ---------- 趋势方向（结构+斜率双确认，强化条件）----------
+    # ---------- 趋势方向 ----------
     def _get_trend_direction(self, data: pd.DataFrame, data_1h: Optional[pd.DataFrame] = None) -> int:
-        """
-        返回当前趋势方向：1=向上，-1=向下，0=中性或无明确方向
-        强化逻辑：结构显著时用结构；否则只有斜率强且综合ADX>25时才认定趋势
-        """
         ema20 = TechnicalIndicators.calculate_ema(data, 20)
         ema50 = TechnicalIndicators.calculate_ema(data, 50)
         atr = TechnicalIndicators.calculate_atr(data).iloc[-1]
@@ -541,11 +533,10 @@ class SignalChecker:
             return 0
         
         ema20_current = ema20.iloc[-1]
-        ema20_prev3 = ema20.iloc[-4]  # 跨越3根K线
+        ema20_prev3 = ema20.iloc[-4]
         slope_per_bar = (ema20_current - ema20_prev3) / ema20_prev3 / 3
         ema50_current = ema50.iloc[-1]
         
-        # 结构判断
         diff = ema20_current - ema50_current
         significant = abs(diff) > atr * UltimateConfig.EMA_STRUCTURE_THRESHOLD
         
@@ -555,8 +546,6 @@ class SignalChecker:
             else:
                 return -1
         
-        # 结构不显著时，需要斜率强且ADX>25才能认定趋势
-        # 获取ADX，如果传入1h数据则用综合ADX，否则用当前数据的ADX
         if data_1h is not None:
             trend_mode = self._get_combined_trend_mode(data, data_1h)
             is_trend = trend_mode in ['TREND', 'TRANSITION']
@@ -577,32 +566,24 @@ class SignalChecker:
         else:
             return 0
 
-    # ---------- 趋势信息（得分+方向）用于评分----------
+    # ---------- 趋势信息（用于评分）----------
     def _get_trend_info(self, data: pd.DataFrame, data_1h: pd.DataFrame, signal_direction: str) -> Tuple[float, int]:
-        """
-        返回 (score, direction)
-        direction: 1=向上, -1=向下, 0=无明确方向
-        score: 趋势匹配得分（0~1），考虑了结构+斜率
-        """
         trend_mode = self._get_combined_trend_mode(data, data_1h)
         
         if trend_mode == 'RANGE':
             return UltimateConfig.TREND_NEUTRAL_SCORE, 0
         elif trend_mode == 'TRANSITION':
-            return 0.6, 0
+            return UltimateConfig.TRANSITION_BASE_SCORE, 0  # 调整为0.4
         
-        # TREND模式：获取方向
         trend_dir = self._get_trend_direction(data, data_1h)
         if trend_dir == 0:
             return UltimateConfig.TREND_NEUTRAL_SCORE, 0
         
-        # 计算匹配得分
         if (signal_direction == 'BUY' and trend_dir == 1) or (signal_direction == 'SELL' and trend_dir == -1):
             base_score = UltimateConfig.TREND_MATCH_SCORE
         else:
             base_score = UltimateConfig.TREND_MISMATCH_SCORE
         
-        # 动能不足惩罚（只有斜率没有结构时，降低得分）
         ema20 = TechnicalIndicators.calculate_ema(data, 20)
         ema50 = TechnicalIndicators.calculate_ema(data, 50)
         atr = TechnicalIndicators.calculate_atr(data).iloc[-1]
@@ -614,12 +595,10 @@ class SignalChecker:
         score = max(0.0, min(base_score, 1.0))
         return score, trend_dir
 
-    # ---------- 1H结构过滤（加入斜率确认）----------
+    # ---------- 1H结构过滤 ----------
     def _is_1h_structure_allowed(self, data_1h: pd.DataFrame, signal_direction: str) -> bool:
-        """如果启用硬性过滤，则1H趋势方向必须与信号方向一致（除非方向为0）"""
         if not UltimateConfig.ENFORCE_1H_STRUCTURE:
             return True
-        
         trend_dir = self._get_trend_direction(data_1h)
         if trend_dir == 0:
             return True
@@ -655,30 +634,26 @@ class SignalChecker:
             return 'SELL', strength
         return '', 0.0
 
-    # ---------- 多周期趋势得分组合（强化惩罚）----------
+    # ---------- 多周期趋势得分组合 ----------
     def _get_trend_score_combined(self, data_15m: pd.DataFrame, data_1h: pd.DataFrame, signal_direction: str) -> float:
-        """结合15分钟和1小时周期的趋势得分，方向不一致时强烈压制"""
         score_15m, dir_15m = self._get_trend_info(data_15m, data_1h, signal_direction)
-        score_1h, dir_1h = self._get_trend_info(data_1h, data_1h, signal_direction)  # 1H自身作为参数
+        score_1h, dir_1h = self._get_trend_info(data_1h, data_1h, signal_direction)
         
-        # 加权平均
         combined = (score_15m * 0.6 + score_1h * 0.4)
         
-        # 方向不一致惩罚
         if dir_15m != 0 and dir_1h != 0:
             if dir_15m == dir_1h:
                 combined *= 1.2
             else:
-                combined *= UltimateConfig.TREND_CONFLICT_PENALTY  # 0.5
+                combined *= UltimateConfig.TREND_CONFLICT_PENALTY  # 0.3
         
         return min(combined, 1.0)
 
-    # ---------- 增强版 CONFIRMATION_K 评分（使用多周期趋势）----------
+    # ---------- CONFIRMATION_K 评分 ----------
     def _calculate_confirmation_k_score_advanced(self, direction: str, rsi: float, volume_ratio: float,
                                                  engulf_strength: float, div_info: tuple, decline_info: tuple,
                                                  data_15m: pd.DataFrame, data_1h: pd.DataFrame,
                                                  macd_df: pd.DataFrame) -> int:
-        # 1. 结构强度 (40%)
         div_type, div_str = div_info
         structure = 0.0
         structure += engulf_strength * 0.6
@@ -686,7 +661,6 @@ class SignalChecker:
             structure += div_str * 0.4
         structure = min(structure, 1.0)
         
-        # 2. 动能确认 (25%)
         momentum = 0.0
         is_fading, fade_str = decline_info
         if is_fading:
@@ -704,10 +678,7 @@ class SignalChecker:
         momentum += min(rsi_score, 1.0) * 0.3
         momentum = min(momentum, 1.0)
         
-        # 3. 量能确认 (15%)
         volume = min(volume_ratio / 2.0, 1.0)
-        
-        # 4. 趋势匹配 (20%)
         trend_score = self._get_trend_score_combined(data_15m, data_1h, direction)
         
         w = UltimateConfig.CONFIRMATION_K_WEIGHTS
@@ -715,10 +686,57 @@ class SignalChecker:
                  momentum * w['momentum'] +
                  volume * w['volume'] +
                  trend_score * w['trend']) * 100
-        
         return int(total)
 
-    # ---------- 主扫描函数（加入所有改进）----------
+    # ---------- 统一ATR止损计算 ----------
+    def _calculate_stop_loss(self, data: pd.DataFrame, price: float, direction: str,
+                             trend_direction: int, trend_mode: str) -> Tuple[float, float, float, float]:
+        """
+        统一计算止损止盈，返回 (entry_main, stop_loss, take_profit1, take_profit2)
+        """
+        atr = TechnicalIndicators.calculate_atr(data).iloc[-1]
+        adx = TechnicalIndicators.calculate_adx(data).iloc[-1]
+        
+        # 根据趋势强度调整止损倍数
+        if adx > UltimateConfig.STRONG_TREND_ADX and trend_direction != 0:
+            atr_mult_stop = UltimateConfig.ATR_STOP_MULTIPLIER_STRONG
+        else:
+            atr_mult_stop = UltimateConfig.ATR_STOP_MULTIPLIER
+        
+        atr_mult_tp1 = UltimateConfig.ATR_TAKE_PROFIT1_MULTIPLIER
+        atr_mult_tp2 = UltimateConfig.ATR_TAKE_PROFIT2_MULTIPLIER
+        max_stop_pct = UltimateConfig.MAX_STOP_PERCENT
+        
+        if direction == 'BUY':
+            # 入场价略高于当前价（避免滑点）
+            entry_main = price * 1.002
+            # 基于近期低点的固定止损（保守）
+            recent_low = data['low'].rolling(10).min().iloc[-1]
+            stop_loss_candidate1 = recent_low * 0.985
+            # 基于ATR的止损
+            stop_loss_candidate2 = price - atr * atr_mult_stop
+            # 取两者中离现价较远的那个（更安全）
+            stop_loss = max(stop_loss_candidate1, stop_loss_candidate2)
+            # 限制最大止损距离
+            min_stop = price * (1 - max_stop_pct)
+            stop_loss = max(stop_loss, min_stop)
+            # ATR止盈
+            take_profit1 = price + atr * atr_mult_tp1
+            take_profit2 = price + atr * atr_mult_tp2
+        else:
+            entry_main = price * 0.998
+            recent_high = data['high'].rolling(10).max().iloc[-1]
+            stop_loss_candidate1 = recent_high * 1.02
+            stop_loss_candidate2 = price + atr * atr_mult_stop
+            stop_loss = min(stop_loss_candidate1, stop_loss_candidate2)
+            max_stop = price * (1 + max_stop_pct)
+            stop_loss = min(stop_loss, max_stop)
+            take_profit1 = price - atr * atr_mult_tp1
+            take_profit2 = price - atr * atr_mult_tp2
+        
+        return entry_main, stop_loss, take_profit1, take_profit2
+
+    # ---------- 主扫描函数 ----------
     def check_all_coins(self, coins_data, cooldown_manager):
         print(f"\n🔍 开始信号扫描 ({len(coins_data)}个币种)...")
         all_signals = []
@@ -739,9 +757,7 @@ class SignalChecker:
                 ma20 = TechnicalIndicators.calculate_ma(data_15m, 20).iloc[-1]
                 ma50 = TechnicalIndicators.calculate_ma(data_15m, 50).iloc[-1]
 
-                # 综合趋势模式
                 trend_mode = self._get_combined_trend_mode(data_15m, data_1h)
-                # 当前趋势方向（用于冷却和信号创建）
                 current_trend_dir = self._get_trend_direction(data_15m, data_1h)
                 
                 signals = []
@@ -839,7 +855,7 @@ class SignalChecker:
         print(f"✅ 扫描完成: 发现 {len(all_signals)} 个交易信号")
         return all_signals
 
-    # ---------- 其他评分函数 ----------
+    # ---------- 评分函数 ----------
     def _calculate_bounce_score(self, rsi, volume_ratio):
         score = 25
         score += (42 - max(20, rsi)) * 1.5
@@ -875,71 +891,36 @@ class SignalChecker:
             score += 20
         return int(score)
 
-    # ---------- 信号创建函数（动态ATR止盈 + 强趋势止损收紧）----------
+    # ---------- 信号创建函数（全部使用统一ATR止损）----------
     def _create_confirmation_k_signal_advanced(self, symbol, data, price, rsi, volume_ratio,
                                                ma20, ma50, direction, engulf_strength,
                                                div_info, decline_info, score,
                                                trend_direction, trend_mode):
-        atr = TechnicalIndicators.calculate_atr(data).iloc[-1]
-        # 根据趋势强度调整止损倍数
-        adx = TechnicalIndicators.calculate_adx(data).iloc[-1]
-        if adx > UltimateConfig.STRONG_TREND_ADX and trend_direction != 0:
-            atr_mult_stop = UltimateConfig.ATR_STOP_MULTIPLIER_STRONG
-        else:
-            atr_mult_stop = UltimateConfig.ATR_STOP_MULTIPLIER
-        
-        atr_mult_tp1 = UltimateConfig.ATR_TAKE_PROFIT1_MULTIPLIER
-        atr_mult_tp2 = UltimateConfig.ATR_TAKE_PROFIT2_MULTIPLIER
-        max_stop_pct = UltimateConfig.MAX_STOP_PERCENT
-        
-        if direction == 'BUY':
-            recent_low = data['low'].rolling(10).min().iloc[-1]
-            entry_main = price * 1.002
-            stop_loss_candidate1 = recent_low * 0.985
-            stop_loss_candidate2 = price - atr * atr_mult_stop
-            stop_loss = max(stop_loss_candidate1, stop_loss_candidate2)
-            min_stop = price * (1 - max_stop_pct)
-            stop_loss = max(stop_loss, min_stop)
-            take_profit1 = price + atr * atr_mult_tp1
-            take_profit2 = price + atr * atr_mult_tp2
-            risk = entry_main - stop_loss
-            reward = take_profit2 - entry_main
-
-            div_text = f"• 看涨背离强度: {div_info[1]:.2f}\n" if div_info[0] == 'bullish' else ""
-            decl_text = f"• 多头衰竭强度: {decline_info[1]:.2f}\n" if decline_info[0] else ""
-            reason = (
-                f"🟢 <b>看涨吞没形态确认</b>\n\n"
-                f"• 吞没强度: {engulf_strength:.2f}\n"
-                f"• 成交量{volume_ratio:.1f}倍\n"
-                f"• RSI({rsi:.1f})\n"
-                f"{div_text}{decl_text}"
-                f"• 建议在${entry_main:.4f}附近买入"
-            )
-        else:
-            recent_high = data['high'].rolling(10).max().iloc[-1]
-            entry_main = price * 0.998
-            stop_loss_candidate1 = recent_high * 1.02
-            stop_loss_candidate2 = price + atr * atr_mult_stop
-            stop_loss = min(stop_loss_candidate1, stop_loss_candidate2)
-            max_stop = price * (1 + max_stop_pct)
-            stop_loss = min(stop_loss, max_stop)
-            take_profit1 = price - atr * atr_mult_tp1
-            take_profit2 = price - atr * atr_mult_tp2
-            risk = stop_loss - entry_main
-            reward = entry_main - take_profit2
-
-            div_text = f"• 看跌背离强度: {div_info[1]:.2f}\n" if div_info[0] == 'bearish' else ""
-            decl_text = f"• 空头衰竭强度: {decline_info[1]:.2f}\n" if decline_info[0] else ""
-            reason = (
-                f"🔴 <b>看跌吞没形态确认</b>\n\n"
-                f"• 吞没强度: {engulf_strength:.2f}\n"
-                f"• 成交量{volume_ratio:.1f}倍\n"
-                f"• RSI({rsi:.1f})\n"
-                f"{div_text}{decl_text}"
-                f"• 建议在${entry_main:.4f}附近做空"
-            )
-
+        entry_main, stop_loss, take_profit1, take_profit2 = self._calculate_stop_loss(
+            data, price, direction, trend_direction, trend_mode
+        )
+        risk = (entry_main - stop_loss) if direction == 'BUY' else (stop_loss - entry_main)
+        reward = (take_profit2 - entry_main) if direction == 'BUY' else (entry_main - take_profit2)
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
+
+        div_text = f"• 看涨背离强度: {div_info[1]:.2f}\n" if div_info[0] == 'bullish' else ""
+        decl_text = f"• 多头衰竭强度: {decline_info[1]:.2f}\n" if decline_info[0] else ""
+        reason = (
+            f"🟢 <b>看涨吞没形态确认</b>\n\n"
+            f"• 吞没强度: {engulf_strength:.2f}\n"
+            f"• 成交量{volume_ratio:.1f}倍\n"
+            f"• RSI({rsi:.1f})\n"
+            f"{div_text}{decl_text}"
+            f"• 建议在${entry_main:.4f}附近买入"
+        ) if direction == 'BUY' else (
+            f"🔴 <b>看跌吞没形态确认</b>\n\n"
+            f"• 吞没强度: {engulf_strength:.2f}\n"
+            f"• 成交量{volume_ratio:.1f}倍\n"
+            f"• RSI({rsi:.1f})\n"
+            f"{div_text}{decl_text}"
+            f"• 建议在${entry_main:.4f}附近做空"
+        )
+
         return {
             'symbol': symbol,
             'pattern': 'CONFIRMATION_K',
@@ -961,28 +942,15 @@ class SignalChecker:
             'trend_mode': trend_mode
         }
 
-    # 其他信号创建函数类似修改，增加trend_direction和trend_mode参数，并应用止损收紧
     def _create_bounce_signal(self, symbol, data, price, rsi, volume_ratio, ma20, score,
                               trend_direction, trend_mode):
-        atr = TechnicalIndicators.calculate_atr(data).iloc[-1]
-        adx = TechnicalIndicators.calculate_adx(data).iloc[-1]
-        if adx > UltimateConfig.STRONG_TREND_ADX and trend_direction != 0:
-            atr_mult_stop = UltimateConfig.ATR_STOP_MULTIPLIER_STRONG
-        else:
-            atr_mult_stop = UltimateConfig.ATR_STOP_MULTIPLIER
-        
-        atr_mult_tp1 = UltimateConfig.ATR_TAKE_PROFIT1_MULTIPLIER
-        atr_mult_tp2 = UltimateConfig.ATR_TAKE_PROFIT2_MULTIPLIER
-        recent_low = data['low'].rolling(20).min().iloc[-1]
-        entry_main = price * 0.998
-        stop_loss = recent_low * 0.98
-        # 也可以考虑加入ATR止损，但为保持与原函数逻辑一致，暂不修改。实际上应该统一使用ATR止损。
-        # 但为了简化，这里沿用原逻辑，实际上可改进。但主要止损在CONFIRMATION_K已体现，其他信号暂不改。
-        take_profit1 = price + atr * atr_mult_tp1
-        take_profit2 = price + atr * atr_mult_tp2
+        entry_main, stop_loss, take_profit1, take_profit2 = self._calculate_stop_loss(
+            data, price, 'BUY', trend_direction, trend_mode
+        )
         risk = entry_main - stop_loss
         reward = take_profit2 - entry_main
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
+        recent_low = data['low'].rolling(20).min().iloc[-1]
         return {
             'symbol': symbol,
             'pattern': 'BOUNCE',
@@ -1006,14 +974,9 @@ class SignalChecker:
 
     def _create_callback_signal(self, symbol, data, price, rsi, volume_ratio, recent_high, callback_pct, ma20, score,
                                 trend_direction, trend_mode):
-        atr = TechnicalIndicators.calculate_atr(data).iloc[-1]
-        atr_mult_tp1 = UltimateConfig.ATR_TAKE_PROFIT1_MULTIPLIER
-        atr_mult_tp2 = UltimateConfig.ATR_TAKE_PROFIT2_MULTIPLIER
-        recent_low = data['low'].rolling(20).min().iloc[-1]
-        entry_main = price * 0.998
-        stop_loss = recent_low * 0.98
-        take_profit1 = price + atr * atr_mult_tp1
-        take_profit2 = price + atr * atr_mult_tp2
+        entry_main, stop_loss, take_profit1, take_profit2 = self._calculate_stop_loss(
+            data, price, 'BUY', trend_direction, trend_mode
+        )
         risk = entry_main - stop_loss
         reward = take_profit2 - entry_main
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
@@ -1040,14 +1003,9 @@ class SignalChecker:
 
     def _create_callback_confirm_signal(self, symbol, data, price, rsi, volume_ratio, recent_high, callback_pct, ma20, ma50, score,
                                         trend_direction, trend_mode):
-        atr = TechnicalIndicators.calculate_atr(data).iloc[-1]
-        atr_mult_tp1 = UltimateConfig.ATR_TAKE_PROFIT1_MULTIPLIER
-        atr_mult_tp2 = UltimateConfig.ATR_TAKE_PROFIT2_MULTIPLIER
-        recent_low = data['low'].rolling(20).min().iloc[-1]
-        entry_main = price * 1.002
-        stop_loss = recent_low * 0.985
-        take_profit1 = price + atr * atr_mult_tp1
-        take_profit2 = price + atr * atr_mult_tp2
+        entry_main, stop_loss, take_profit1, take_profit2 = self._calculate_stop_loss(
+            data, price, 'BUY', trend_direction, trend_mode
+        )
         risk = entry_main - stop_loss
         reward = take_profit2 - entry_main
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
@@ -1074,17 +1032,13 @@ class SignalChecker:
 
     def _create_trend_exhaustion_signal(self, symbol, data, price, rsi, volume_ratio, ma20, score,
                                         trend_direction, trend_mode):
-        atr = TechnicalIndicators.calculate_atr(data).iloc[-1]
-        atr_mult_tp1 = UltimateConfig.ATR_TAKE_PROFIT1_MULTIPLIER
-        atr_mult_tp2 = UltimateConfig.ATR_TAKE_PROFIT2_MULTIPLIER
-        recent_high = data['high'].rolling(20).max().iloc[-1]
-        entry_main = price * 1.002
-        stop_loss = recent_high * 1.02
-        take_profit1 = price - atr * atr_mult_tp1
-        take_profit2 = price - atr * atr_mult_tp2
+        entry_main, stop_loss, take_profit1, take_profit2 = self._calculate_stop_loss(
+            data, price, 'SELL', trend_direction, trend_mode
+        )
         risk = stop_loss - entry_main
         reward = entry_main - take_profit2
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
+        recent_high = data['high'].rolling(20).max().iloc[-1]
         return {
             'symbol': symbol,
             'pattern': 'TREND_EXHAUSTION',
@@ -1285,7 +1239,7 @@ def main():
     print(f"📅 版本: {UltimateConfig.VERSION}")
     print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📊 监控币种: {len(MONITOR_COINS)}个")
-    print(f"🎯 信号模式: 5种策略 + 增强型吞没(复合背离/方向MACD/动态冷却/ATR/机构趋势过滤/综合ADX/强趋势止损)")
+    print(f"🎯 信号模式: 5种策略 + 增强型吞没(统一ATR风控/趋势冲突强化/过渡期降分)")
     print("="*60)
 
     try:
