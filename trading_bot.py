@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v35.6 正式版
+终极智能交易系统 v35.6 正式版（修复JSON序列化问题）
 改进：动态阈值 + 观察池延迟确认 + 高分豁免冷却 + ATR最小百分比 + 历史胜率加权
 适用于 GitHub Actions 定时运行，单次分析后退出
 """
@@ -184,27 +184,34 @@ class UltimateConfig:
 
 # ============ 辅助函数：加载/保存观察池和胜率 ============
 def load_observation_pool():
-    """加载观察池"""
+    """加载观察池，并将字符串时间转换回datetime"""
     if not os.path.exists(UltimateConfig.OBSERVATION_POOL_FILE):
         return []
     try:
         with open(UltimateConfig.OBSERVATION_POOL_FILE, 'r') as f:
             data = json.load(f)
-        # 转换字符串时间为datetime
         for item in data:
             item['time'] = datetime.fromisoformat(item['time'])
+            if 'signal' in item:
+                # 将信号内的signal_time也转换回datetime
+                item['signal']['signal_time'] = datetime.fromisoformat(item['signal']['signal_time'])
         return data
-    except:
+    except Exception as e:
+        print(f"⚠️ 加载观察池失败: {e}")
         return []
 
 
 def save_observation_pool(pool):
-    """保存观察池"""
-    # 转换为可序列化格式
+    """保存观察池，将datetime转换为字符串"""
     serializable = []
     for item in pool:
         copy = item.copy()
         copy['time'] = item['time'].isoformat()
+        if 'signal' in copy:
+            # 复制信号字典，并将内部的signal_time转为字符串
+            sig_copy = copy['signal'].copy()
+            sig_copy['signal_time'] = sig_copy['signal_time'].isoformat()
+            copy['signal'] = sig_copy
         serializable.append(copy)
     with open(UltimateConfig.OBSERVATION_POOL_FILE, 'w') as f:
         json.dump(serializable, f, indent=2)
@@ -1003,13 +1010,15 @@ class SignalChecker:
         if UltimateConfig.OBSERVATION_ENABLED:
             for sig in all_signals:
                 if UltimateConfig.OBSERVATION_THRESHOLD <= sig['score'] < UltimateConfig.HIGH_CONFIDENCE_THRESHOLD:
+                    # 复制信号，并将signal_time转为字符串（将在保存时处理）
+                    sig_copy = sig.copy()
                     obs_entry = {
                         'time': current_time,
                         'symbol': sig['symbol'],
                         'direction': sig['direction'],
                         'pattern': sig['pattern'],
                         'score': sig['score'],
-                        'signal': sig  # 保存完整信号，方便后续重用
+                        'signal': sig_copy
                     }
                     new_observation_pool.append(obs_entry)
             # 保存观察池
