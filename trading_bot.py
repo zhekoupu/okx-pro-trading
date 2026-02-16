@@ -51,6 +51,13 @@ MONITOR_COINS = [
 
 print(f"📊 监控币种列表: {len(MONITOR_COINS)} 个币种")
 
+# ============ 自定义 JSON 编码器（处理 datetime）============
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
 # ============ 配置类 ============
 class UltimateConfig:
     VERSION = "35.6-正式版（动态阈值+观察池+高分豁免+最小止盈+胜率加权）"
@@ -89,7 +96,7 @@ class UltimateConfig:
     OBSERVATION_ENABLED = True
     # 观察池文件
     OBSERVATION_POOL_FILE = 'observation_pool.json'
-    # 延迟确认所需的最小分数提升（例如，延迟后分数需增加多少才能发送）
+    # 延迟确认所需的最小分数提升
     OBSERVATION_SCORE_BOOST = 5
 
     # 高分豁免冷却（分数 >= 此值可豁免同方向冷却）
@@ -193,7 +200,6 @@ def load_observation_pool():
         for item in data:
             item['time'] = datetime.fromisoformat(item['time'])
             if 'signal' in item:
-                # 将信号内的signal_time也转换回datetime
                 item['signal']['signal_time'] = datetime.fromisoformat(item['signal']['signal_time'])
         return data
     except Exception as e:
@@ -202,19 +208,9 @@ def load_observation_pool():
 
 
 def save_observation_pool(pool):
-    """保存观察池，将datetime转换为字符串"""
-    serializable = []
-    for item in pool:
-        copy = item.copy()
-        copy['time'] = item['time'].isoformat()
-        if 'signal' in copy:
-            # 复制信号字典，并将内部的signal_time转为字符串
-            sig_copy = copy['signal'].copy()
-            sig_copy['signal_time'] = sig_copy['signal_time'].isoformat()
-            copy['signal'] = sig_copy
-        serializable.append(copy)
+    """保存观察池，使用自定义编码器自动处理datetime"""
     with open(UltimateConfig.OBSERVATION_POOL_FILE, 'w') as f:
-        json.dump(serializable, f, indent=2)
+        json.dump(pool, f, indent=2, cls=DateTimeEncoder)
 
 
 def load_success_rates():
@@ -269,9 +265,6 @@ class CooldownManager:
 
     def check_cooldown(self, symbol: str, direction: str, current_trend_direction: int,
                        current_trend_mode: str, score: int) -> Tuple[bool, str]:
-        """
-        检查冷却，支持高分豁免
-        """
         if not self.config['enable_cooldown']:
             return True, ""
         now = datetime.now()
@@ -286,17 +279,12 @@ class CooldownManager:
             last_trend_dir = last_signal.get('trend_direction', 0)
             last_trend_mode = last_signal.get('trend_mode', 'RANGE')
 
-            # 豁免条件1：趋势方向反转
             if current_trend_direction != 0 and last_trend_dir != 0 and current_trend_direction != last_trend_dir:
                 return True, "趋势方向反转豁免"
-
-            # 豁免条件2：趋势模式变化
             if last_trend_mode in ['TREND', 'TRANSITION'] and current_trend_mode == 'RANGE':
                 return True, "趋势进入盘整豁免"
             if last_trend_mode == 'RANGE' and current_trend_mode in ['TREND', 'TRANSITION']:
                 return True, "趋势启动豁免"
-
-            # 豁免条件3：高分信号（>= HIGH_SCORE_COOLDOWN_EXEMPT）允许通过，即使冷却未结束
             if score >= UltimateConfig.HIGH_SCORE_COOLDOWN_EXEMPT:
                 return True, "高分信号豁免冷却"
 
@@ -499,31 +487,21 @@ class SignalChecker:
     def __init__(self):
         self.base_thresholds = UltimateConfig.BASE_SIGNAL_THRESHOLDS
         self.params = UltimateConfig.OPTIMIZATION_PARAMS
-        self.success_rates = load_success_rates()  # 加载历史胜率
+        self.success_rates = load_success_rates()
 
-    # ---------- 动态阈值调整 ----------
     def _get_dynamic_threshold(self, pattern: str, data: pd.DataFrame, price: float) -> int:
-        """根据波动率调整阈值"""
         if not UltimateConfig.DYNAMIC_THRESHOLD_ENABLED:
             return self.base_thresholds.get(pattern, 40)
-
         atr = TechnicalIndicators.calculate_atr(data).iloc[-1]
         volatility = atr / price
-        # 限制波动因子范围
         factor = max(UltimateConfig.MIN_VOLATILITY_FACTOR, min(volatility, UltimateConfig.MAX_VOLATILITY_FACTOR))
         base = self.base_thresholds.get(pattern, 40)
-        # 波动大时阈值降低，波动小时阈值提高（但不超过base）
         adjusted = int(base * (1 - factor))
-        # 确保不低于基础值的80%
         adjusted = max(int(base * 0.8), adjusted)
         return adjusted
 
-    # ---------- 历史胜率加权 ----------
     def _apply_success_rate_weight(self, symbol: str, pattern: str, raw_score: int) -> int:
-        """根据历史胜率调整分数"""
         rate = self.success_rates.get(symbol, {}).get(pattern, 1.0)
-        # 胜率高于1.0？不可能，应该是0-1之间。如果缺失，默认1.0不调整。
-        # 胜率低于0.5时降低分数，高于0.8时略微提升
         if rate < 0.5:
             return int(raw_score * 0.8)
         elif rate > 0.8:
@@ -531,7 +509,6 @@ class SignalChecker:
         else:
             return raw_score
 
-    # ---------- 摆动点检测 ----------
     def _find_swing_highs_lows(self, data: pd.DataFrame, window: int = 5):
         highs = data['high'].values
         lows = data['low'].values
@@ -544,20 +521,16 @@ class SignalChecker:
                 swing_lows.append(i)
         return swing_highs, swing_lows
 
-    # ---------- 复合背离检测 ----------
     def _detect_rsi_divergence_swing(self, data: pd.DataFrame, rsi_series: pd.Series, lookback=30) -> tuple:
         if len(data) < lookback:
             return None, 0.0
-
         swing_highs, swing_lows = self._find_swing_highs_lows(data.iloc[-lookback:], window=3)
         base_idx = len(data) - lookback
         swing_highs = [base_idx + i for i in swing_highs]
         swing_lows = [base_idx + i for i in swing_lows]
-
         w_rsi = UltimateConfig.DIVERGENCE_WEIGHTS['rsi']
         w_price = UltimateConfig.DIVERGENCE_WEIGHTS['price']
         price_factor = UltimateConfig.PRICE_STRENGTH_FACTOR
-
         if len(swing_lows) >= 2:
             last_low_idx = swing_lows[-1]
             prev_low_idx = swing_lows[-2]
@@ -565,14 +538,12 @@ class SignalChecker:
             prev_low_price = data['low'].iloc[prev_low_idx]
             last_rsi = rsi_series.iloc[last_low_idx]
             prev_rsi = rsi_series.iloc[prev_low_idx]
-
             if last_low_price < prev_low_price and last_rsi > prev_rsi:
                 rsi_diff = min((last_rsi - prev_rsi) / 20, 1.0)
                 price_drop_pct = (prev_low_price - last_low_price) / prev_low_price
                 price_strength = min(price_drop_pct * price_factor, 1.0)
                 strength = rsi_diff * w_rsi + price_strength * w_price
                 return 'bullish', strength
-
         if len(swing_highs) >= 2:
             last_high_idx = swing_highs[-1]
             prev_high_idx = swing_highs[-2]
@@ -580,24 +551,19 @@ class SignalChecker:
             prev_high_price = data['high'].iloc[prev_high_idx]
             last_rsi = rsi_series.iloc[last_high_idx]
             prev_rsi = rsi_series.iloc[prev_high_idx]
-
             if last_high_price > prev_high_price and last_rsi < prev_rsi:
                 rsi_diff = min((prev_rsi - last_rsi) / 20, 1.0)
                 price_rise_pct = (last_high_price - prev_high_price) / prev_high_price
                 price_strength = min(price_rise_pct * price_factor, 1.0)
                 strength = rsi_diff * w_rsi + price_strength * w_price
                 return 'bearish', strength
-
         return None, 0.0
 
-    # ---------- MACD衰竭检测 ----------
     def _detect_macd_hist_decline_adv(self, hist_series: pd.Series, direction: str, periods=3) -> tuple:
         if len(hist_series) < periods:
             return False, 0.0
-
         recent = hist_series.iloc[-periods:].values
         factor = UltimateConfig.MACD_EXHAUSTION_FACTOR
-
         if direction == 'BUY':
             if all(h > 0 for h in recent) and all(recent[i] < recent[i - 1] for i in range(1, len(recent))):
                 if abs(recent[-1]) < abs(recent[0]) * factor:
@@ -610,10 +576,8 @@ class SignalChecker:
                     increase_ratio = (recent[-1] - recent[0]) / (abs(recent[0]) + 1e-6)
                     strength = min(increase_ratio, 1.0)
                     return True, strength
-
         return False, 0.0
 
-    # ---------- 综合趋势模式 ----------
     def _get_combined_trend_mode(self, data_15m: pd.DataFrame, data_1h: pd.DataFrame) -> str:
         adx_15m = TechnicalIndicators.calculate_adx(data_15m).iloc[-1]
         adx_1h = TechnicalIndicators.calculate_adx(data_1h).iloc[-1]
@@ -625,42 +589,33 @@ class SignalChecker:
         else:
             return 'TREND'
 
-    # ---------- 趋势方向 ----------
     def _get_trend_direction(self, data: pd.DataFrame, data_1h: Optional[pd.DataFrame] = None) -> int:
         ema20 = TechnicalIndicators.calculate_ema(data, 20)
         ema50 = TechnicalIndicators.calculate_ema(data, 50)
         atr = TechnicalIndicators.calculate_atr(data).iloc[-1]
-
         if len(ema20) < 4 or len(ema50) < 2:
             return 0
-
         ema20_current = ema20.iloc[-1]
         ema20_prev3 = ema20.iloc[-4]
         slope_per_bar = (ema20_current - ema20_prev3) / ema20_prev3 / 3
         ema50_current = ema50.iloc[-1]
-
         diff = ema20_current - ema50_current
         significant = abs(diff) > atr * UltimateConfig.EMA_STRUCTURE_THRESHOLD
-
         if significant:
             if diff > 0:
                 return 1
             else:
                 return -1
-
         if data_1h is not None:
             trend_mode = self._get_combined_trend_mode(data, data_1h)
             is_trend = trend_mode in ['TREND', 'TRANSITION']
         else:
             adx = TechnicalIndicators.calculate_adx(data).iloc[-1]
             is_trend = adx > UltimateConfig.TREND_MODES['TRANSITION']
-
         if not is_trend:
             return 0
-
         slope_up = slope_per_bar > UltimateConfig.MIN_TREND_SLOPE_PERCENT
         slope_down = slope_per_bar < -UltimateConfig.MIN_TREND_SLOPE_PERCENT
-
         if slope_up:
             return 1
         elif slope_down:
@@ -668,24 +623,19 @@ class SignalChecker:
         else:
             return 0
 
-    # ---------- 趋势信息（用于评分）----------
     def _get_trend_info(self, data: pd.DataFrame, data_1h: pd.DataFrame, signal_direction: str) -> Tuple[float, int]:
         trend_mode = self._get_combined_trend_mode(data, data_1h)
-
         if trend_mode == 'RANGE':
             return UltimateConfig.TREND_NEUTRAL_SCORE, 0
         elif trend_mode == 'TRANSITION':
             return UltimateConfig.TRANSITION_BASE_SCORE, 0
-
         trend_dir = self._get_trend_direction(data, data_1h)
         if trend_dir == 0:
             return UltimateConfig.TREND_NEUTRAL_SCORE, 0
-
         if (signal_direction == 'BUY' and trend_dir == 1) or (signal_direction == 'SELL' and trend_dir == -1):
             base_score = UltimateConfig.TREND_MATCH_SCORE
         else:
             base_score = UltimateConfig.TREND_MISMATCH_SCORE
-
         ema20 = TechnicalIndicators.calculate_ema(data, 20)
         ema50 = TechnicalIndicators.calculate_ema(data, 50)
         atr = TechnicalIndicators.calculate_atr(data).iloc[-1]
@@ -693,11 +643,9 @@ class SignalChecker:
         significant = abs(diff) > atr * UltimateConfig.EMA_STRUCTURE_THRESHOLD
         if not significant:
             base_score *= 0.7
-
         score = max(0.0, min(base_score, 1.0))
         return score, trend_dir
 
-    # ---------- 1H结构检查（返回是否允许及惩罚系数）----------
     def _check_1h_structure(self, data_1h: pd.DataFrame, signal_direction: str) -> Tuple[bool, float]:
         if UltimateConfig.ENFORCE_1H_STRUCTURE:
             trend_dir = self._get_trend_direction(data_1h)
@@ -714,14 +662,12 @@ class SignalChecker:
             else:
                 return True, UltimateConfig.ONE_HOUR_CONFLICT_PENALTY
 
-    # ---------- 趋势模式过滤 ----------
     def _is_signal_allowed(self, pattern: str, trend_mode: str) -> bool:
         allow_map = UltimateConfig.TREND_SIGNAL_ALLOW
         if trend_mode in allow_map:
             return pattern in allow_map[trend_mode]
         return True
 
-    # ---------- 吞没形态检测 ----------
     def _detect_engulfing(self, data: pd.DataFrame) -> tuple:
         if len(data) < 2:
             return '', 0.0
@@ -731,7 +677,6 @@ class SignalChecker:
         curr_body = abs(curr['close'] - curr['open'])
         prev_open, prev_close = prev['open'], prev['close']
         curr_open, curr_close = curr['open'], curr['close']
-
         if (prev_close < prev_open) and (curr_close > curr_open) and \
                 curr_open < prev_close and curr_close > prev_open:
             strength = min(curr_body / prev_body, 2.0) if prev_body > 0 else 1.0
@@ -742,22 +687,17 @@ class SignalChecker:
             return 'SELL', strength
         return '', 0.0
 
-    # ---------- 多周期趋势得分组合 ----------
     def _get_trend_score_combined(self, data_15m: pd.DataFrame, data_1h: pd.DataFrame, signal_direction: str) -> float:
         score_15m, dir_15m = self._get_trend_info(data_15m, data_1h, signal_direction)
         score_1h, dir_1h = self._get_trend_info(data_1h, data_1h, signal_direction)
-
         combined = (score_15m * 0.6 + score_1h * 0.4)
-
         if dir_15m != 0 and dir_1h != 0:
             if dir_15m == dir_1h:
                 combined *= 1.2
             else:
                 combined *= UltimateConfig.TREND_CONFLICT_PENALTY
-
         return min(combined, 1.0)
 
-    # ---------- CONFIRMATION_K 评分（细化加权）----------
     def _calculate_confirmation_k_score_advanced(self, direction: str, rsi: float, volume_ratio: float,
                                                  engulf_strength: float, div_info: tuple, decline_info: tuple,
                                                  data_15m: pd.DataFrame, data_1h: pd.DataFrame,
@@ -768,7 +708,6 @@ class SignalChecker:
         if div_type == direction.lower():
             structure += div_str * 0.4
         structure = min(structure, 1.0)
-
         momentum = 0.0
         is_fading, fade_str = decline_info
         if is_fading:
@@ -785,10 +724,8 @@ class SignalChecker:
                 rsi_score = 0
         momentum += min(rsi_score, 1.0) * 0.3
         momentum = min(momentum, 1.0)
-
         volume = min(volume_ratio / 2.0, 1.0)
         trend_score = self._get_trend_score_combined(data_15m, data_1h, direction)
-
         w = UltimateConfig.CONFIRMATION_K_WEIGHTS
         total = (structure * w['structure'] +
                  momentum * w['momentum'] +
@@ -796,21 +733,17 @@ class SignalChecker:
                  trend_score * w['trend']) * 100
         return int(total)
 
-    # ---------- 统一ATR止损计算（带最小百分比）----------
     def _calculate_stop_loss(self, data: pd.DataFrame, price: float, direction: str,
                              trend_direction: int, trend_mode: str) -> Tuple[float, float, float, float]:
         atr = TechnicalIndicators.calculate_atr(data).iloc[-1]
         adx = TechnicalIndicators.calculate_adx(data).iloc[-1]
-
         if adx > UltimateConfig.STRONG_TREND_ADX and trend_direction != 0:
             atr_mult_stop = UltimateConfig.ATR_STOP_MULTIPLIER_STRONG
         else:
             atr_mult_stop = UltimateConfig.ATR_STOP_MULTIPLIER
-
         atr_mult_tp1 = UltimateConfig.ATR_TAKE_PROFIT1_MULTIPLIER
         atr_mult_tp2 = UltimateConfig.ATR_TAKE_PROFIT2_MULTIPLIER
         max_stop_pct = UltimateConfig.MAX_STOP_PERCENT
-
         if direction == 'BUY':
             entry_main = price * 1.002
             recent_low = data['low'].rolling(10).min().iloc[-1]
@@ -819,7 +752,6 @@ class SignalChecker:
             stop_loss = max(stop_loss_candidate1, stop_loss_candidate2)
             min_stop = price * (1 - max_stop_pct)
             stop_loss = max(stop_loss, min_stop)
-            # 止盈：至少保证最小百分比
             tp1 = price + max(atr * atr_mult_tp1, price * UltimateConfig.MIN_TAKE_PROFIT1_PERCENT)
             tp2 = price + max(atr * atr_mult_tp2, price * UltimateConfig.MIN_TAKE_PROFIT2_PERCENT)
             take_profit1, take_profit2 = tp1, tp2
@@ -834,16 +766,13 @@ class SignalChecker:
             tp1 = price - max(atr * atr_mult_tp1, price * UltimateConfig.MIN_TAKE_PROFIT1_PERCENT)
             tp2 = price - max(atr * atr_mult_tp2, price * UltimateConfig.MIN_TAKE_PROFIT2_PERCENT)
             take_profit1, take_profit2 = tp1, tp2
-
         return entry_main, stop_loss, take_profit1, take_profit2
 
-    # ---------- 主扫描函数（应用动态阈值、观察池、历史胜率加权）----------
     def check_all_coins(self, coins_data, cooldown_manager):
         print(f"\n🔍 开始信号扫描 ({len(coins_data)}个币种)...")
         all_signals = []
         signal_counts = defaultdict(int)
 
-        # 加载观察池
         observation_pool = load_observation_pool() if UltimateConfig.OBSERVATION_ENABLED else []
         current_time = datetime.now()
 
@@ -975,27 +904,21 @@ class SignalChecker:
             except Exception as e:
                 continue
 
-        # 处理观察池：检查是否有信号满足延迟确认条件
+        # 处理观察池
         new_observation_pool = []
         for obs in observation_pool:
-            # 检查是否过期（例如超过2小时）
             if current_time - obs['time'] > timedelta(hours=2):
                 continue
             symbol = obs['symbol']
-            # 重新获取该币种的最新数据
             if symbol in coins_data:
                 data_dict = coins_data[symbol]
                 data_15m = data_dict.get('15m')
                 if data_15m is not None and len(data_15m) >= 30:
-                    # 获取当前趋势方向
                     current_trend_dir = self._get_trend_direction(data_15m, data_1h=data_dict.get('1H'))
-                    # 检查趋势方向是否与信号一致（或至少没有强烈冲突）
                     direction = obs['direction']
                     if (direction == 'BUY' and current_trend_dir == 1) or (direction == 'SELL' and current_trend_dir == -1):
-                        # 趋势确认，可以发送
                         new_score = obs['score'] + UltimateConfig.OBSERVATION_SCORE_BOOST
                         if new_score >= UltimateConfig.HIGH_CONFIDENCE_THRESHOLD:
-                            # 构造信号并发送
                             signal = obs['signal']
                             signal['score'] = new_score
                             signal['signal_time'] = current_time
@@ -1003,25 +926,19 @@ class SignalChecker:
                             all_signals.append(signal)
                             signal_counts[obs['pattern']] += 1
                             continue
-            # 如果不满足，重新放入观察池
             new_observation_pool.append(obs)
 
-        # 将本次的中分信号加入观察池
         if UltimateConfig.OBSERVATION_ENABLED:
             for sig in all_signals:
                 if UltimateConfig.OBSERVATION_THRESHOLD <= sig['score'] < UltimateConfig.HIGH_CONFIDENCE_THRESHOLD:
-                    # 复制信号，并将signal_time转为字符串（将在保存时处理）
-                    sig_copy = sig.copy()
-                    obs_entry = {
+                    new_observation_pool.append({
                         'time': current_time,
                         'symbol': sig['symbol'],
                         'direction': sig['direction'],
                         'pattern': sig['pattern'],
                         'score': sig['score'],
-                        'signal': sig_copy
-                    }
-                    new_observation_pool.append(obs_entry)
-            # 保存观察池
+                        'signal': sig
+                    })
             save_observation_pool(new_observation_pool)
 
         self._print_statistics(signal_counts, len(coins_data))
@@ -1064,7 +981,7 @@ class SignalChecker:
             score += 20
         return int(score)
 
-    # ---------- 信号创建函数（全部使用统一ATR止损）----------
+    # ---------- 信号创建函数 ----------
     def _create_confirmation_k_signal_advanced(self, symbol, data, price, rsi, volume_ratio,
                                                ma20, ma50, direction, engulf_strength,
                                                div_info, decline_info, score,
@@ -1246,7 +1163,7 @@ class SignalChecker:
             print(f"   未发现任何信号")
 
 
-# ============ Telegram 通知器（支持信号分层发送）============
+# ============ Telegram 通知器 ============
 class TelegramNotifier:
     def __init__(self, bot_token, chat_id):
         self.bot_token = bot_token
@@ -1267,12 +1184,9 @@ class TelegramNotifier:
         if not self.bot:
             print(f"\n📨 [模拟发送] {signal['symbol']} - {signal['pattern']} ({signal['score']}分)")
             return True
-
-        # 信号分层：只有分数 >= 高置信度阈值才发送
         if signal['score'] < UltimateConfig.HIGH_CONFIDENCE_THRESHOLD:
             print(f"📝 信号 {signal['symbol']} 分数 {signal['score']} 低于高置信度阈值，仅记录不发送")
             return False
-
         message = self._format_signal_message(signal, cooldown_reason)
         for attempt in range(1, UltimateConfig.TELEGRAM_RETRY + 1):
             try:
