@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v36.13 正式版（增强冷却逻辑 + 修复pandas警告）
+终极智能交易系统 v36.14 正式版（动态分层 + 结构确认）
 改进：
-1. 修复 pandas fillna 警告，使用 bfill() 替代 fillna(method='bfill')
-2. 冷却记录“评分提高才覆盖”，防止低分信号重置冷却
-3. 增加调试日志开关（环境变量 DEBUG=1 启用）
-4. 优化趋势衰竭信号对1小时趋势的过滤
+1. BOUNCE 信号根据趋势模式动态调整 RSI 阈值（强趋势≤40，盘整≤50）
+2. CALLBACK_CONFIRM_K 增加 RSI 底背离确认，减少与 CONFIRMATION_K 的重叠
+3. 保留趋势衰竭 RSI 下降加分（v36.13 特性）
+4. 修复 pandas fillna 警告
+5. 冷却记录“评分提高才覆盖”
 """
 
 import os
@@ -72,7 +73,7 @@ class DateTimeEncoder(json.JSONEncoder):
 
 # ============ 配置类 ============
 class UltimateConfig:
-    VERSION = "36.13-正式版（增强冷却+警告修复）"
+    VERSION = "36.14-动态分层+结构确认"
     MAX_SIGNALS_TO_SEND = 3
     TELEGRAM_RETRY = 3
     TELEGRAM_RETRY_DELAY = 1
@@ -114,9 +115,16 @@ class UltimateConfig:
     # 高分豁免冷却（分数 >= 此值可豁免同方向冷却）
     HIGH_SCORE_COOLDOWN_EXEMPT = 85
 
+    # ----- 动态分层阈值：BOUNCE 信号按趋势模式区分 -----
+    BOUNCE_RSI_LIMITS = {
+        'TREND': 40,
+        'TRANSITION': 45,
+        'RANGE': 50
+    }
+
     OPTIMIZATION_PARAMS = {
         'volume_ratio_min': 0.7,
-        'rsi_bounce_max': 50,
+        'rsi_bounce_max': 50,          # 仅作为 fallback，实际使用 BOUNCE_RSI_LIMITS
         'rsi_callback_min': 45,
         'callback_pct_min': 2,
         'callback_pct_max': 25,
@@ -510,7 +518,7 @@ class TechnicalIndicators:
         return atr.bfill().fillna(0)
 
 
-# ============ 信号检查器（v36.13）============
+# ============ 信号检查器（v36.14）============
 class SignalChecker:
     def __init__(self):
         self.base_thresholds = UltimateConfig.BASE_SIGNAL_THRESHOLDS
@@ -818,14 +826,17 @@ class SignalChecker:
                 volume_ratio = TechnicalIndicators.calculate_volume_ratio(data_15m, 20).iloc[-1]
                 ma20 = TechnicalIndicators.calculate_ma(data_15m, 20).iloc[-1]
                 ma50 = TechnicalIndicators.calculate_ma(data_15m, 50).iloc[-1]
+                rsi_series = TechnicalIndicators.calculate_rsi(data_15m, 14)  # 用于背离检测
 
                 trend_mode = self._get_combined_trend_mode(data_15m, data_1h)
                 current_trend_dir = self._get_trend_direction(data_15m, data_1h)
 
                 signals = []
 
-                # 反弹信号
-                if rsi < self.params['rsi_bounce_max'] and volume_ratio > self.params['volume_ratio_min']:
+                # ----- BOUNCE 信号（动态分层 RSI）-----
+                # 根据趋势模式获取允许的最大 RSI
+                bounce_rsi_limit = UltimateConfig.BOUNCE_RSI_LIMITS.get(trend_mode, 50)
+                if rsi < bounce_rsi_limit and volume_ratio > self.params['volume_ratio_min']:
                     if self._is_signal_allowed('BOUNCE', trend_mode):
                         allowed, penalty = self._check_1h_structure(data_1h, 'BUY')
                         if allowed:
@@ -840,7 +851,7 @@ class SignalChecker:
                                 ))
                                 signal_counts['BOUNCE'] += 1
 
-                # 回调信号
+                # ----- CALLBACK 信号（回调买入）-----
                 if rsi > self.params['rsi_callback_min']:
                     if self._is_signal_allowed('CALLBACK', trend_mode):
                         allowed, penalty = self._check_1h_structure(data_1h, 'BUY')
@@ -859,7 +870,7 @@ class SignalChecker:
                                     ))
                                     signal_counts['CALLBACK'] += 1
 
-                # 回调确认转强信号
+                # ----- CALLBACK_CONFIRM_K 信号（回调确认转强，需结构确认）-----
                 if 48 <= rsi <= 72 and volume_ratio > 1.2:
                     if self._is_signal_allowed('CALLBACK_CONFIRM_K', trend_mode):
                         allowed, penalty = self._check_1h_structure(data_1h, 'BUY')
@@ -870,18 +881,21 @@ class SignalChecker:
                                 recent_3_closes = data_15m['close'].iloc[-3:].values
                                 price_increasing = len(recent_3_closes) >= 2 and recent_3_closes[-1] > recent_3_closes[0]
                                 if price_increasing and ma20 > ma50 and current_price > ma20:
-                                    raw_score = self._calculate_callback_confirm_score(rsi, volume_ratio, callback_pct)
-                                    raw_score = int(raw_score * penalty)
-                                    raw_score = self._apply_success_rate_weight(symbol, 'CALLBACK_CONFIRM_K', raw_score)
-                                    dynamic_th = self._get_dynamic_threshold('CALLBACK_CONFIRM_K', data_15m, current_price)
-                                    if raw_score >= dynamic_th:
-                                        signals.append(self._create_callback_confirm_signal(
-                                            symbol, data_15m, current_price, rsi, volume_ratio, recent_high, callback_pct, ma20, ma50, raw_score,
-                                            trend_direction=current_trend_dir, trend_mode=trend_mode
-                                        ))
-                                        signal_counts['CALLBACK_CONFIRM_K'] += 1
+                                    # 结构确认：RSI底背离（强度>0.2）
+                                    div_info = self._detect_rsi_divergence_swing(data_15m, rsi_series, lookback=30)
+                                    if div_info[0] == 'bullish' and div_info[1] > 0.2:
+                                        raw_score = self._calculate_callback_confirm_score(rsi, volume_ratio, callback_pct)
+                                        raw_score = int(raw_score * penalty)
+                                        raw_score = self._apply_success_rate_weight(symbol, 'CALLBACK_CONFIRM_K', raw_score)
+                                        dynamic_th = self._get_dynamic_threshold('CALLBACK_CONFIRM_K', data_15m, current_price)
+                                        if raw_score >= dynamic_th:
+                                            signals.append(self._create_callback_confirm_signal(
+                                                symbol, data_15m, current_price, rsi, volume_ratio, recent_high, callback_pct, ma20, ma50, raw_score,
+                                                trend_direction=current_trend_dir, trend_mode=trend_mode
+                                            ))
+                                            signal_counts['CALLBACK_CONFIRM_K'] += 1
 
-                # 趋势衰竭做空信号（优化版：1h趋势过滤 + RSI下降加分）
+                # ----- TREND_EXHAUSTION 趋势衰竭做空（含RSI下降加分）-----
                 if rsi > self.params['trend_exhaustion_rsi_min'] and volume_ratio < 1.0:
                     if self._is_signal_allowed('TREND_EXHAUSTION', trend_mode):
                         # 获取1小时趋势方向，如果为上升趋势（方向1），则跳过做空信号
@@ -890,7 +904,6 @@ class SignalChecker:
                             continue
 
                         # 计算RSI下降加分（RSI比前一根低）
-                        rsi_series = TechnicalIndicators.calculate_rsi(data_15m, 14)
                         rsi_prev = rsi_series.iloc[-2] if len(rsi_series) >= 2 else rsi
                         if rsi < rsi_prev:
                             rsi_boost = 8  # RSI下降加分
@@ -910,12 +923,11 @@ class SignalChecker:
                                 ))
                                 signal_counts['TREND_EXHAUSTION'] += 1
 
-                # 吞没形态信号 CONFIRMATION_K
+                # ----- CONFIRMATION_K 吞没形态（已有完整结构）-----
                 engulf_dir, engulf_strength = self._detect_engulfing(data_15m)
                 if engulf_dir and self._is_signal_allowed('CONFIRMATION_K', trend_mode):
                     allowed, penalty = self._check_1h_structure(data_1h, engulf_dir)
                     if allowed:
-                        rsi_series = TechnicalIndicators.calculate_rsi(data_15m, 14)
                         macd_df = TechnicalIndicators.calculate_macd(data_15m)
                         hist_series = macd_df['histogram']
 
@@ -1161,6 +1173,7 @@ class SignalChecker:
                 f"• RSI({rsi:.1f})处于强势区\n"
                 f"• 成交量{volume_ratio:.1f}倍\n"
                 f"• MA20(${ma20:.4f}) > MA50(${ma50:.4f})\n"
+                f"• 结构确认: RSI底背离\n"
                 f"• 建议在${entry_main:.4f}附近建仓"
             ),
             'entry_points': {
@@ -1397,7 +1410,7 @@ def main():
     print(f"📅 版本: {UltimateConfig.VERSION}")
     print(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📊 监控币种: {len(MONITOR_COINS)}个")
-    print(f"🎯 信号模式: 5种策略 + 增强型吞没(动态阈值/观察池/高分豁免/最小止盈/胜率加权) + 趋势衰竭优化")
+    print(f"🎯 信号模式: 动态分层BOUNCE + 结构确认CALLBACK_CONFIRM_K + 趋势衰竭优化")
     print("=" * 60)
 
     try:
