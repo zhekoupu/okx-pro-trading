@@ -485,7 +485,7 @@ class TechnicalIndicators:
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         alpha = 1.0 / period
         atr = tr.ewm(alpha=alpha, adjust=False).mean()
-        return atr.bfill().fillna(0)
+        atr = atr.bfill().fillna(0) return atr
 
 
 # ============ 信号检查器（v36.12）============
