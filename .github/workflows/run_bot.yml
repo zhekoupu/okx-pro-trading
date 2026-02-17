@@ -1,102 +1,110 @@
-name: Ultimate Trading Bot v36.12 (Production)
+name: Ultimate Trading Bot v36.12 (Financial Grade)
 
 on:
   schedule:
-    # 每45分钟运行一次（UTC时间）
-    - cron: '*/45 * * * *'
-  workflow_dispatch:          # 允许手动触发
+    - cron: '*/45 * * * *'   # 每45分钟运行（UTC）
+  workflow_dispatch:
 
-# 防止同时运行多个实例，避免冷却状态冲突
+# ===============================
+# 并发锁：确保任何时候只有一个实例运行
+# 防止多个 workflow 同时修改冷却状态
+# ===============================
 concurrency:
-  group: trading-bot
+  group: ultimate-trading-bot-v36
   cancel-in-progress: true
 
 env:
   PYTHON_VERSION: '3.10'
-  JOB_TIMEOUT_MINUTES: 15
 
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ env.JOB_TIMEOUT_MINUTES }}   # 作业级超时保护
+    timeout-minutes: 15   # 硬编码，避免使用变量
 
     steps:
+      # 1️⃣ 记录开始时间（用于监控性能，可选）
+      - name: Record start time
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
+
+      # 2️⃣ 拉取代码
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+      # 3️⃣ 设置 Python 环境并启用依赖缓存
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'                     # 缓存 pip 依赖，加速安装
+          cache: 'pip'
 
-      # ===================== 冷却状态持久化缓存 =====================
-      - name: Restore cooldown state
+      # ===============================
+      # 冷却保护 + 多策略隔离
+      # 缓存所有策略的冷却状态文件（.pkl）
+      # 通过分支名隔离不同开发分支的冷却状态
+      # ===============================
+      - name: Restore cooldown state (multi-strategy)
         uses: actions/cache@v4
         with:
-          path: cooldown_state.pkl
-          # 固定 key，每次运行覆盖；restore-keys 提供回退到历史缓存
-          key: cooldown-state-v36
+          path: |
+            *.pkl
+            # 可指定多个文件或目录，例如：
+            # cooldown_*.pkl
+          key: cooldown-v36-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            cooldown-state-
+            cooldown-v36-${{ github.ref_name }}-
+            cooldown-v36-
 
-      # ===================== 安装依赖（带重试机制）=====================
-      - name: Install dependencies (with retry)
+      # 4️⃣ 安装依赖（带重试，应对网络波动）
+      - name: Install dependencies
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 5
           max_attempts: 3
-          retry_on: error
+          retry_wait_seconds: 20
           command: |
             python -m pip install --upgrade pip
-            pip install pandas numpy requests pyTelegramBotAPI scipy
+            # 如果使用 requirements.txt：
+            pip install -r requirements.txt
+            # 否则手动列出包：
+            # pip install pandas numpy requests pyTelegramBotAPI scipy
 
-      # ===================== 运行主程序（带重试与日志）=====================
-      - name: Run Ultimate Trading System
+      # ===============================
+      # 核心运行步骤
+      # 多币种并行：由脚本内部通过异步/多线程实现
+      # 重试机制：网络或临时故障时自动重试
+      # ===============================
+      - name: Run Ultimate Trading System (multi-coin parallel)
         id: run_bot
+        uses: nick-fields/retry@v3
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PYTHONUNBUFFERED: 1               # 实时输出日志
-        run: |
-          # 简单 shell 重试循环（3次）
-          for attempt in 1 2 3; do
-            echo "🚀 Attempt $attempt of 3..."
-            if python main.py; then
-              echo "✅ Analysis completed successfully."
-              exit 0
-            else
-              echo "❌ Attempt $attempt failed."
-              if [ $attempt -lt 3 ]; then
-                echo "⏳ Waiting 15 seconds before retry..."
-                sleep 15
-              fi
-            fi
-          done
-          echo "💥 All attempts failed." >&2
-          exit 1
+          PYTHONUNBUFFERED: 1
+        with:
+          timeout_minutes: 10
+          max_attempts: 2
+          retry_wait_seconds: 60
+          retry_on: error
+          command: python main.py   # 请确保入口文件为 main.py
 
-      # ===================== 失败时上传日志 =====================
-      - name: Upload failure logs
-        if: failure() && steps.run_bot.outcome == 'failure'
+      # 5️⃣ 计算执行耗时（可选，用于监控）
+      - name: Calculate execution time
+        if: always()
+        run: |
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "✅ 本次运行耗时: ${DURATION}秒"
+
+      # ===============================
+      # 日志与状态文件归档（总是上传，便于复盘）
+      # 保留最近7天，兼顾存储与追溯
+      # ===============================
+      - name: Upload artifacts (logs & cooldown)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: trading-bot-logs-${{ github.run_id }}
+          name: trading-run-${{ github.run_id }}
           path: |
             *.log
-            cooldown_state.pkl
+            *.pkl
           retention-days: 7
-
-      # ===================== 可选：发送运行完成通知 =====================
-      - name: Notify completion via Telegram
-        if: always()
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          STATUS="${{ job.status }}"
-          MESSAGE="🤖 分析任务完成 (Run ID: ${{ github.run_id }})%0A状态: $STATUS"
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${TELEGRAM_CHAT_ID}" \
-            -d text="${MESSAGE}" \
-            -d disable_notification=true
