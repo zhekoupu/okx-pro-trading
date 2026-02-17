@@ -46,7 +46,7 @@ MONITOR_COINS = [
     'FIL', 'TRX', 'ETC', 'XTZ', 'AAVE', 'COMP', 'YFI',
     'SUSHI', 'SNX', 'CRV', '1INCH', 'NEAR', 'GRT', 'SAND',
     'MANA', 'ENJ', 'CHZ', 'BAT', 'ZIL', 'ONE', 'IOTA',
-    'DASH', 'ZEC', 'EGLD', 'CRO', 'KSM', 'DYDX', 'JUP',
+    'DASH', 'ZEC', 'XAU', 'CRO', 'KSM', 'DYDX', 'JUP',
     'STORJ', 'SKL', 'WLD',
     'ARB', 'OP', 'LDO', 'APT', 'SUI', 'SEI', 'INJ',
     'FET', 'THETA', 'AR', 'ENS', 'PEPE', 'SHIB',
