@@ -1,5 +1,5 @@
 
-# OKX Professional Trading System v3.0
+# OKX Professional Trading System v3.0别偷用
 
 Institutional-grade OKX perpetual futures signal system.
 - Mainstream coin filtering
