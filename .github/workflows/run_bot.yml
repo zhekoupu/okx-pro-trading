@@ -1,32 +1,72 @@
-name: Run bot
+name: Ultimate Trading Bot v36.12
 
 on:
   schedule:
-    - cron: '*/45 * * * *'   # 每45分钟运行一次
-  workflow_dispatch:          # 允许手动触发
+    - cron: '*/45 * * * *'   # 每45分钟运行一次（UTC）
+  workflow_dispatch:
+
+concurrency:
+  group: trading-bot
+  cancel-in-progress: true
 
 jobs:
   analyze:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Cache cooldown state
+          cache: 'pip'
+
+      # ===============================
+      # 冷却系统持久化缓存（修正版）
+      # ===============================
+      - name: Restore cooldown state
         uses: actions/cache@v4
         with:
           path: cooldown_state.pkl
-          key: cooldown-${{ github.run_id }}
+          key: cooldown-state-v36
           restore-keys: |
-            cooldown-
+            cooldown-state-
+
+      # ===============================
+      # 安装依赖（生产级写法）
+      # ===============================
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install pandas numpy requests pyTelegramBotAPI scipy
-          # 如果不需要TA-Lib，可以跳过；如需安装，参考 TA-Lib 官方文档
-      - name: Run analysis
+
+      # ===============================
+      # 运行主程序（带重试机制）
+      # ===============================
+      - name: Run Ultimate Trading System v36.12
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python main.py
+        run: |
+          for i in 1 2 3
+          do
+            echo "Attempt $i..."
+            python main.py && break
+            echo "Retrying in 10 seconds..."
+            sleep 10
+          done
+
+      # ===============================
+      # 失败时输出日志
+      # ===============================
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trading-bot-logs
+          path: |
+            *.log
+            cooldown_state.pkl
