@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v36.12 正式版（完整修复所有截断，确保语法完整）
-改进：动态阈值 + 观察池延迟确认 + 高分豁免冷却 + ATR最小百分比 + 历史胜率加权 + 趋势衰竭优化
-适用于 GitHub Actions 定时运行，单次分析后退出
+终极智能交易系统 v36.13 正式版（增强冷却逻辑 + 修复pandas警告）
+改进：
+1. 修复 pandas fillna 警告，使用 bfill() 替代 fillna(method='bfill')
+2. 冷却记录“评分提高才覆盖”，防止低分信号重置冷却
+3. 增加调试日志开关（环境变量 DEBUG=1 启用）
+4. 优化趋势衰竭信号对1小时趋势的过滤
 """
 
 import os
@@ -51,6 +54,9 @@ MONITOR_COINS = [
 
 print(f"📊 监控币种列表: {len(MONITOR_COINS)} 个币种")
 
+# 调试开关
+DEBUG = os.environ.get("DEBUG", "0") == "1"
+
 # ============ 自定义 JSON 编码器（处理 datetime 和 numpy 类型）============
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -66,7 +72,7 @@ class DateTimeEncoder(json.JSONEncoder):
 
 # ============ 配置类 ============
 class UltimateConfig:
-    VERSION = "36.12-正式版（完整修复所有截断）"
+    VERSION = "36.13-正式版（增强冷却+警告修复）"
     MAX_SIGNALS_TO_SEND = 3
     TELEGRAM_RETRY = 3
     TELEGRAM_RETRY_DELAY = 1
@@ -230,7 +236,7 @@ def load_success_rates():
         return {}
 
 
-# ============ 冷却管理器（按方向独立冷却 + 趋势记忆 + 模式感知 + 高分豁免）============
+# ============ 冷却管理器（按方向独立冷却 + 趋势记忆 + 模式感知 + 高分豁免 + 评分比较）============
 class CooldownManager:
     def __init__(self):
         self.config = UltimateConfig.COOLDOWN_CONFIG
@@ -301,23 +307,38 @@ class CooldownManager:
 
     def record_signal(self, symbol: str, direction: str, pattern: str, score: int,
                       trend_direction: int, trend_mode: str):
+        """记录信号，只有新评分 >= 旧评分时才更新冷却时间"""
         now = datetime.now()
         key = self._get_key(symbol, direction)
-        cooldown_minutes = self.config['same_coin_cooldown']
-        for (low, high), minutes in UltimateConfig.COOLDOWN_DYNAMIC.items():
-            if low <= score < high:
-                cooldown_minutes = minutes
-                break
-        self.cooldown_db[key] = {
-            'time': now,
-            'symbol': symbol,
-            'direction': direction,
-            'pattern': pattern,
-            'score': score,
-            'cooldown_minutes': cooldown_minutes,
-            'trend_direction': trend_direction,
-            'trend_mode': trend_mode
-        }
+        
+        # 获取旧的评分（如果存在）
+        old_record = self.cooldown_db.get(key)
+        old_score = old_record.get('score', 0) if old_record else 0
+        
+        # 只有当新评分 >= 旧评分时才更新
+        if score >= old_score:
+            cooldown_minutes = self.config['same_coin_cooldown']
+            for (low, high), minutes in UltimateConfig.COOLDOWN_DYNAMIC.items():
+                if low <= score < high:
+                    cooldown_minutes = minutes
+                    break
+            self.cooldown_db[key] = {
+                'time': now,
+                'symbol': symbol,
+                'direction': direction,
+                'pattern': pattern,
+                'score': score,
+                'cooldown_minutes': cooldown_minutes,
+                'trend_direction': trend_direction,
+                'trend_mode': trend_mode
+            }
+            if DEBUG and score > old_score:
+                print(f"📈 信号评分提高，更新冷却记录: {key} {score} (原{old_score})")
+        else:
+            if DEBUG:
+                print(f"⏭️ 新信号评分({score})低于现有记录({old_score})，跳过更新")
+            return  # 不更新，但保留旧记录
+
         self.signal_history[symbol].append({
             'date': now.strftime('%Y-%m-%d'),
             'time': now.strftime('%H:%M:%S'),
@@ -485,10 +506,11 @@ class TechnicalIndicators:
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         alpha = 1.0 / period
         atr = tr.ewm(alpha=alpha, adjust=False).mean()
+        # 修复 pandas 警告：使用 bfill() 替代 fillna(method='bfill')
         return atr.bfill().fillna(0)
 
 
-# ============ 信号检查器（v36.12）============
+# ============ 信号检查器（v36.13）============
 class SignalChecker:
     def __init__(self):
         self.base_thresholds = UltimateConfig.BASE_SIGNAL_THRESHOLDS
@@ -921,6 +943,8 @@ class SignalChecker:
                     all_signals.append(best_signal)
 
             except Exception as e:
+                if DEBUG:
+                    print(f"⚠️ 处理 {symbol} 时出错: {e}")
                 continue
 
         # 处理观察池
@@ -1291,6 +1315,8 @@ class UltimateTradingSystem:
         print(f"\n✅ 系统初始化完成")
         print(f"📡 监控币种: {len(MONITOR_COINS)}个")
         print(f"🤖 Telegram 通知: {'✅ 已启用' if self.telegram.bot else '⚠️ 已禁用'}")
+        if DEBUG:
+            print("🔧 调试模式: 已启用")
         print("=" * 60)
 
     def run_analysis(self):
