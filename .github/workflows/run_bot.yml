@@ -1,16 +1,13 @@
-name: Ultimate Trading Bot v36.12 (Financial Grade)
+name: Ultimate Smart Trading Bot (额度节约版)
 
 on:
   schedule:
-    - cron: '*/45 * * * *'   # 每45分钟运行（UTC）
+    - cron: '*/45 * * * *'   # 每45分钟运行一次，减少总运行次数（相比15分钟可节约2/3额度）
   workflow_dispatch:
 
-# ===============================
-# 并发锁：确保任何时候只有一个实例运行
-# 防止多个 workflow 同时修改冷却状态
-# ===============================
+# 并发锁：确保同一时间只有一个实例运行，避免冲突和浪费
 concurrency:
-  group: ultimate-trading-bot-v36
+  group: ultimate-bot
   cancel-in-progress: true
 
 env:
@@ -19,42 +16,30 @@ env:
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 15   # 硬编码，避免使用变量
+    timeout-minutes: 15        # 防止卡死浪费额度
 
     steps:
-      # 1️⃣ 记录开始时间（用于监控性能，可选）
-      - name: Record start time
-        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
-
-      # 2️⃣ 拉取代码
+      # 1️⃣ 检出代码
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 3️⃣ 设置 Python 环境并启用依赖缓存
+      # 2️⃣ 设置 Python 并启用依赖缓存（核心节约点）
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
+          cache: 'pip'          # 缓存 pip 依赖，避免重复下载
 
-      # ===============================
-      # 冷却保护 + 多策略隔离
-      # 缓存所有策略的冷却状态文件（.pkl）
-      # 通过分支名隔离不同开发分支的冷却状态
-      # ===============================
-      - name: Restore cooldown state (multi-strategy)
+      # 3️⃣ 恢复冷却状态缓存（避免重新计算冷却）
+      - name: Restore cooldown state
         uses: actions/cache@v4
         with:
-          path: |
-            *.pkl
-            # 可指定多个文件或目录，例如：
-            # cooldown_*.pkl
-          key: cooldown-v36-${{ github.ref_name }}-${{ github.run_id }}
+          path: cooldown_state.pkl   # 您的冷却文件路径
+          key: cooldown-v36-${{ github.ref_name }}
           restore-keys: |
-            cooldown-v36-${{ github.ref_name }}-
             cooldown-v36-
 
-      # 4️⃣ 安装依赖（带重试，应对网络波动）
+      # 4️⃣ 安装依赖（带重试，减少因网络波动导致的失败重跑）
       - name: Install dependencies
         uses: nick-fields/retry@v3
         with:
@@ -63,17 +48,10 @@ jobs:
           retry_wait_seconds: 20
           command: |
             python -m pip install --upgrade pip
-            # 如果使用 requirements.txt：
-            pip install -r requirements.txt
-            # 否则手动列出包：
-            # pip install pandas numpy requests pyTelegramBotAPI scipy
+            pip install -r requirements.txt   # 建议使用 requirements.txt
 
-      # ===============================
-      # 核心运行步骤
-      # 多币种并行：由脚本内部通过异步/多线程实现
-      # 重试机制：网络或临时故障时自动重试
-      # ===============================
-      - name: Run Ultimate Trading System (multi-coin parallel)
+      # 5️⃣ 运行主程序（内部已实现多币种并发）
+      - name: Run trading bot
         id: run_bot
         uses: nick-fields/retry@v3
         env:
@@ -85,26 +63,13 @@ jobs:
           max_attempts: 2
           retry_wait_seconds: 60
           retry_on: error
-          command: python main.py   # 请确保入口文件为 main.py
+          command: python main.py   # 您的入口文件
 
-      # 5️⃣ 计算执行耗时（可选，用于监控）
-      - name: Calculate execution time
-        if: always()
-        run: |
-          END_TIME=$(date +%s)
-          DURATION=$((END_TIME - START_TIME))
-          echo "✅ 本次运行耗时: ${DURATION}秒"
-
-      # ===============================
-      # 日志与状态文件归档（总是上传，便于复盘）
-      # 保留最近7天，兼顾存储与追溯
-      # ===============================
-      - name: Upload artifacts (logs & cooldown)
-        if: always()
+      # 6️⃣ （可选）上传日志，便于复盘；保留1天以节约存储
+      - name: Upload logs (optional)
+        if: always() && hashFiles('*.log') != ''
         uses: actions/upload-artifact@v4
         with:
-          name: trading-run-${{ github.run_id }}
-          path: |
-            *.log
-            *.pkl
-          retention-days: 7
+          name: logs-${{ github.run_id }}
+          path: '*.log'
+          retention-days: 1
