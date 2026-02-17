@@ -87,3 +87,14 @@ jobs:
         if: always()
         run: |
           echo "✅ 本次运行完成于 $(date)"
+
+      # 8️⃣ ❌ 失败通知（新增，仅在任务失败时发送）
+      - name: Send failure notification
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="❌ v36.12 分析任务失败！%0A运行ID: ${{ github.run_id }}%0A分支: ${{ github.ref_name }}%0A请立即检查日志！"
