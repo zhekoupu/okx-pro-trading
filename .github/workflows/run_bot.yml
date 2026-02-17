@@ -1,72 +1,95 @@
-name: Ultimate Trading Bot v36.12
+name: Ultimate Trading Bot v36.12 (Financial Grade)
 
 on:
   schedule:
-    - cron: '*/45 * * * *'   # 每45分钟运行一次（UTC）
+    - cron: '*/45 * * * *'   # 每45分钟运行（UTC）
   workflow_dispatch:
 
+# ===============================
+# 并发锁（防止重复执行）
+# ===============================
 concurrency:
-  group: trading-bot
+  group: ultimate-trading-bot
   cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.10'
+  JOB_TIMEOUT_MINUTES: 15
 
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: ${{ env.JOB_TIMEOUT_MINUTES }}
 
     steps:
+
+      # 1️⃣ 记录开始时间
+      - name: Record start time
+        id: start_time
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
+
+      # 2️⃣ 拉取代码
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
+      # 3️⃣ Python环境
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
 
-      # ===============================
-      # 冷却系统持久化缓存（修正版）
-      # ===============================
+      # 4️⃣ 冷却状态持久化（稳定key）
       - name: Restore cooldown state
         uses: actions/cache@v4
         with:
           path: cooldown_state.pkl
-          key: cooldown-state-v36
+          key: cooldown-state-v36-${{ github.ref_name }}
           restore-keys: |
-            cooldown-state-
+            cooldown-state-v36-
+            cooldown-
 
-      # ===============================
-      # 安装依赖（生产级写法）
-      # ===============================
+      # 5️⃣ 安装依赖（带重试）
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pandas numpy requests pyTelegramBotAPI scipy
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          retry_wait_seconds: 20
+          command: |
+            python -m pip install --upgrade pip
+            pip install pandas numpy requests pyTelegramBotAPI scipy
 
-      # ===============================
-      # 运行主程序（带重试机制）
-      # ===============================
-      - name: Run Ultimate Trading System v36.12
+      # 6️⃣ 运行主程序（金融级重试机制）
+      - name: Run Ultimate Smart Trading System v36.12
+        id: run_bot
+        uses: nick-fields/retry@v3
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          for i in 1 2 3
-          do
-            echo "Attempt $i..."
-            python main.py && break
-            echo "Retrying in 10 seconds..."
-            sleep 10
-          done
+          PYTHONUNBUFFERED: 1
+        with:
+          timeout_minutes: 10
+          max_attempts: 2
+          retry_wait_seconds: 60
+          retry_on: error
+          command: python main.py
 
-      # ===============================
-      # 失败时输出日志
-      # ===============================
-      - name: Upload failure logs
-        if: failure()
+      # 7️⃣ 计算执行耗时
+      - name: Calculate execution time
+        if: always()
+        run: |
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "EXEC_DURATION=$DURATION" >> $GITHUB_ENV
+
+      # 8️⃣ 上传日志与状态文件
+      - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: trading-bot-logs
+          name: trading-run-${{ github.run_id }}
           path: |
             *.log
-            cooldown_state.pkl
+            *.pkl
+          retention-days: 7
