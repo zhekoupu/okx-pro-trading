@@ -3,7 +3,7 @@ name: Ultimate Trading Bot v36.12 (Production)
 on:
   schedule:
     # 每 45 分钟运行一次，平衡实时性与额度消耗
-    - cron: '*/45 * * * *'
+    - cron: '0,30 * * * *'
   workflow_dispatch:
 
 # 并发锁：防止同时运行多个实例，避免冷却文件冲突
