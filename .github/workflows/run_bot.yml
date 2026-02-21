@@ -1,4 +1,4 @@
-name: Ultimate Trading Bot v36.12 (Production)
+name: Ultimate Trading Bot v37.0 (Production)
 
 on:
   schedule:
@@ -8,7 +8,7 @@ on:
 
 # 并发锁：防止同时运行多个实例，避免冷却文件冲突
 concurrency:
-  group: ultimate-bot-v36
+  group: ultimate-bot-v37
   cancel-in-progress: true
 
 env:
@@ -31,18 +31,21 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
 
-      # 3️⃣ 恢复冷却状态缓存（使用动态主键，确保每次更新后保存）
-      - name: Restore cooldown state
+      # 3️⃣ 恢复冷却及观察池状态缓存
+      - name: Restore cooldown and observation state
         uses: actions/cache@v4
-        id: cache-cooldown
+        id: cache-state
         with:
-          path: cooldown_state.pkl   # 您的冷却文件路径，请确保脚本使用相对路径
+          path: |
+            cooldown_state.pkl
+            observation_pool.json
+            success_rates.json
           # 主键包含 run_id，保证每次运行唯一，从而强制在结束后保存新缓存
-          key: cooldown-v36-${{ github.ref_name }}-${{ github.run_id }}
+          key: state-v37-${{ github.ref_name }}-${{ github.run_id }}
           # 回退键：当没有精确匹配时，尝试加载最近一次的历史缓存
           restore-keys: |
-            cooldown-v36-${{ github.ref_name }}-
-            cooldown-v36-
+            state-v37-${{ github.ref_name }}-
+            state-v37-
 
       # 4️⃣ 安装依赖（带重试，应对网络波动）
       - name: Install dependencies
@@ -53,13 +56,16 @@ jobs:
           retry_wait_seconds: 20
           command: |
             python -m pip install --upgrade pip
-            # 如果有 requirements.txt，强烈建议使用
-            pip install -r requirements.txt
-            # 如果没有，可以手动列出依赖，例如：
-            # pip install pandas numpy requests pyTelegramBotAPI scipy
+            # 建议使用 requirements.txt 管理依赖，确保包含 scikit-learn
+            if [ -f requirements.txt ]; then
+              pip install -r requirements.txt
+            else
+              # 手动安装 v37.0 所需的所有依赖
+              pip install pandas numpy requests pyTelegramBotAPI scipy scikit-learn
+            fi
 
       # 5️⃣ 运行主程序（内部已实现多币种并发）
-      - name: Run Ultimate Trading System v36.12
+      - name: Run Ultimate Trading System v37.0
         id: run_bot
         uses: nick-fields/retry@v3
         env:
@@ -88,7 +94,7 @@ jobs:
         run: |
           echo "✅ 本次运行完成于 $(date)"
 
-      # 8️⃣ ❌ 失败通知（新增，仅在任务失败时发送）
+      # 8️⃣ ❌ 失败通知（仅在任务失败时发送）
       - name: Send failure notification
         if: failure()
         env:
@@ -97,4 +103,4 @@ jobs:
         run: |
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
-            -d text="❌ v36.12 分析任务失败！%0A运行ID: ${{ github.run_id }}%0A分支: ${{ github.ref_name }}%0A请立即检查日志！"
+            -d text="❌ v37.0 分析任务失败！%0A运行ID: ${{ github.run_id }}%0A分支: ${{ github.ref_name }}%0A请立即检查日志！"
