@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极智能交易系统 v37.1 正式版（评分优化版）
+终极智能交易系统 v37.0 正式版（全面优化版）
 优化特性：
-1. 评分封顶机制 score = min(score,100)
-2. RSI过热扣分（>68 减8分）
-3. 无放量降权（<1.2 乘0.9）
-4. 止损过近加分（<0.5% 加5分）
-5. CONFIRMATION_K 专项权重模型（增加趋势匹配度、成交量放大奖励）
+1. 多周期背离共振检测（15m+1h+4h）
+2. 成交量协同性检查（缩量回调/放量突破）
+3. RSI极端区域过滤
+4. 趋势衰竭增加MACD死叉确认
+5. 动态仓位计算（基于评分+波动率）
+6. 相关性风险控制（板块限制）
+7. 时间衰减因子
+8. 数据源冗余（OKX+Binance）
+9. 异常K线过滤
+10. 内置轻量回测引擎
+11. 量能硬性过滤（volume_ratio<0.5丢弃，0.5-0.8扣15分）
+12. 止损最小距离检查（0.2%最小距离）
+13. 趋势衰竭双向信号（上涨衰竭做空 + 下跌衰竭做多）
 """
 
 import os
@@ -131,7 +139,7 @@ class BacktestResult:
 
 # ============ 高级配置类 ============
 class UltimateConfig:
-    VERSION = "37.1-评分优化版"
+    VERSION = "37.0-全面优化版"
     
     # ===== 基础设置 =====
     MAX_SIGNALS_TO_SEND = 3
@@ -224,6 +232,16 @@ class UltimateConfig:
         'lookback_period': 10
     }
     
+    # ===== 新增：量能硬性过滤 =====
+    VOLUME_FILTER = {
+        'direct_discard': 0.5,          # 低于此值直接丢弃
+        'heavy_penalty': 0.8,            # 低于此值扣分
+        'heavy_penalty_points': 15
+    }
+    
+    # ===== 新增：止损最小距离 =====
+    MIN_STOP_DISTANCE_PERCENT = 0.002   # 止损最小距离（当前价格的0.2%）
+    
     # ===== 趋势衰竭专用 =====
     TREND_EXHAUSTION = {
         'volume_ultra_low': 0.3,
@@ -231,7 +249,7 @@ class UltimateConfig:
         'structure_high_window': 10,
         'structure_low_window': 10,
         'stop_buffer': 0.0015,
-        'require_macd_cross': True,      # 要求MACD死叉
+        'require_macd_cross': True,      # 要求MACD死叉/金叉
         'macd_lookback': 3
     }
     
@@ -323,7 +341,8 @@ class UltimateConfig:
         'rsi_callback_min': 45,
         'callback_pct_min': 2,
         'callback_pct_max': 25,
-        'trend_exhaustion_rsi_min': 65,
+        'trend_exhaustion_rsi_min': 65,      # 做空RSI下限
+        'trend_exhaustion_rsi_max_for_buy': 35,  # 做多RSI上限
     }
 
 # ============ 辅助函数：加载/保存观察池和胜率 ============
@@ -429,7 +448,8 @@ class CooldownManager:
                 return True, "趋势进入盘整豁免"
             if last_trend_mode == 'RANGE' and current_trend_mode in ['TREND', 'TRANSITION']:
                 return True, "趋势启动豁免"
-            if score >= UltimateConfig.HIGH_SCORE_COOLDOWN_EXEMPT:
+            # 高分信号豁免冷却
+            if score >= 80:
                 return True, "高分信号豁免冷却"
 
             if elapsed < cooldown_minutes:
@@ -818,7 +838,7 @@ class AdvancedIndicators:
             
         return False
 
-# ============ 信号检查器（v37.1）============
+# ============ 信号检查器（v37.0）============
 class SignalChecker:
     def __init__(self):
         self.base_thresholds = UltimateConfig.BASE_SIGNAL_THRESHOLDS
@@ -1000,7 +1020,7 @@ class SignalChecker:
             for i in range(1, len(macd)):
                 if macd.iloc[i-1] > signal.iloc[i-1] and macd.iloc[i] <= signal.iloc[i]:
                     return True
-        else:
+        else:  # BUY
             for i in range(1, len(macd)):
                 if macd.iloc[i-1] < signal.iloc[i-1] and macd.iloc[i] >= signal.iloc[i]:
                     return True
@@ -1165,7 +1185,7 @@ class SignalChecker:
                             price * UltimateConfig.STOP_LOSS['min_tp2_percent'])
             take_profit1, take_profit2 = tp1, tp2
             
-        else:
+        else:  # BUY
             recent_low = data['low'].rolling(window).min().iloc[-1]
             stop_loss = recent_low * (1 - buffer)
             max_stop_pct = UltimateConfig.STOP_LOSS['max_stop_percent']
@@ -1193,34 +1213,7 @@ class SignalChecker:
             
         return max(0, score)
 
-    # ========== 新增的通用评分调整 ==========
-    def _apply_additional_scoring(self, score: int, rsi: float, volume_ratio: float,
-                                   stop_loss: float, current_price: float) -> int:
-        """
-        应用额外的评分调整：
-        1. RSI > 68 → 减8分
-        2. 成交量 < 1.2 → 分数 ×0.9
-        3. 止损距离 < 0.5% → 加5分
-        4. 封顶 min(score, 100)
-        """
-        # RSI过热扣分
-        if rsi > 68:
-            score -= 8
-
-        # 无放量降权
-        if volume_ratio < 1.2:
-            score = int(score * 0.9)
-
-        # 止损距离过近加分（止损百分比）
-        stop_pct = abs(stop_loss - current_price) / current_price * 100
-        if stop_pct < 0.5:
-            score += 5
-
-        # 封顶
-        score = min(score, 100)
-        return max(0, score)
-
-    # ----- 评分函数（已调整 CONFIRMATION_K 权重）-----
+    # ----- 评分函数 -----
     def _calculate_bounce_score(self, rsi, volume_ratio):
         score = 25
         score += (42 - max(20, rsi)) * 1.5
@@ -1249,61 +1242,42 @@ class SignalChecker:
             score += 15
         return int(score)
 
-    def _calculate_trend_exhaustion_score(self, rsi, volume_ratio):
-        score = 30
-        score += min(30, (rsi - 65) * 2)
+    def _calculate_trend_exhaustion_score(self, direction: str, rsi: float, volume_ratio: float) -> int:
+        """计算趋势衰竭信号的基础分（双向）"""
+        if direction == 'SELL':
+            score = 30
+            score += min(30, (rsi - 65) * 2)          # RSI>65时加分
+        else:  # BUY
+            score = 30
+            score += min(30, (35 - rsi) * 2)          # RSI<35时加分
         if volume_ratio < 0.8:
             score += 20
         return int(score)
 
     def _calculate_confirmation_k_score(self, direction, rsi, volume_ratio, engulf_strength,
-                                         div_type, div_strength, trend_score=None):
-        """
-        优化后的 CONFIRMATION_K 评分：
-        - 基础分 30
-        - 吞没强度 (0~20)
-        - 背离强度 (0~30) 仅当方向匹配
-        - RSI位置 (0~15)
-        - 成交量 (0~20) + 放量奖励 (>1.5 加5)
-        - 趋势匹配度 (0~20)
-        """
-        base = 30
-        score = base
-
-        # 吞没形态强度 (最高20)
+                                       div_type, div_strength):
+        score = 40
         score += engulf_strength * 20
-
-        # 背离强度 (最高30)
+        
         if div_type == direction.lower():
             score += div_strength * 30
-
-        # RSI 位置 (0~15)
-        if 40 <= rsi <= 60:
-            score += 15
-
-        # 成交量基础奖励 (0~20)
-        vol_bonus = min(20, volume_ratio * 10)
-        score += vol_bonus
-
-        # 成交量显著放大 (>1.5) 额外加5分
-        if volume_ratio > 1.5:
-            score += 5
-
-        # 趋势匹配度 (0~20)
-        if trend_score is not None:
-            score += int(trend_score * 20)
-
+            
+        if direction == 'BUY':
+            if 40 <= rsi <= 60:
+                score += 15
+        else:
+            if 40 <= rsi <= 60:
+                score += 15
+                
+        score += min(20, volume_ratio * 10)
         return int(score)
 
-    # ----- 信号创建函数（已集成额外评分调整）-----
+    # ----- 信号创建函数 -----
     def _create_bounce_signal(self, symbol, data, price, rsi, volume_ratio, ma20, score,
                               trend_direction, trend_mode):
         entry_main, stop_loss, take_profit1, take_profit2 = self._calculate_stop_loss(
             data, price, 'BUY', trend_direction
         )
-        # 应用额外评分
-        score = self._apply_additional_scoring(score, rsi, volume_ratio, stop_loss, price)
-
         risk = entry_main - stop_loss
         reward = take_profit2 - entry_main
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
@@ -1339,9 +1313,6 @@ class SignalChecker:
         entry_main, stop_loss, take_profit1, take_profit2 = self._calculate_stop_loss(
             data, price, 'BUY', trend_direction
         )
-        # 应用额外评分
-        score = self._apply_additional_scoring(score, rsi, volume_ratio, stop_loss, price)
-
         risk = entry_main - stop_loss
         reward = take_profit2 - entry_main
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
@@ -1377,9 +1348,6 @@ class SignalChecker:
         entry_main, stop_loss, take_profit1, take_profit2 = self._calculate_stop_loss(
             data, price, 'BUY', trend_direction
         )
-        # 应用额外评分
-        score = self._apply_additional_scoring(score, rsi, volume_ratio, stop_loss, price)
-
         risk = entry_main - stop_loss
         reward = take_profit2 - entry_main
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
@@ -1417,33 +1385,46 @@ class SignalChecker:
 
     def _create_trend_exhaustion_signal(self, symbol, data, price,
                                         rsi, volume_ratio, ma20, score,
-                                        trend_direction, trend_mode):
+                                        direction, trend_direction, trend_mode):
         entry_main, stop_loss, take_profit1, take_profit2 = self._calculate_stop_loss_structure(
-            data, price, 'SELL'
+            data, price, direction
         )
-        # 应用额外评分
-        score = self._apply_additional_scoring(score, rsi, volume_ratio, stop_loss, price)
-
-        risk = stop_loss - entry_main
-        reward = entry_main - take_profit2
+        # 计算盈亏比（根据方向调整）
+        if direction == 'SELL':
+            risk = stop_loss - entry_main
+            reward = entry_main - take_profit2
+        else:
+            risk = entry_main - stop_loss
+            reward = take_profit2 - entry_main
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
         recent_high = data['high'].rolling(20).max().iloc[-1]
+        recent_low = data['low'].rolling(20).min().iloc[-1]
 
+        if direction == 'SELL':
+            reason = (
+                f"🔴 <b>上涨衰竭做空</b>\n\n"
+                f"• RSI({rsi:.1f})超买\n"
+                f"• 成交量萎缩{volume_ratio:.1f}x\n"
+                f"• K线上影线长/实体缩小\n"
+                f"• MACD死叉确认\n"
+                f"• 止损设在结构高点${stop_loss:.4f}"
+            )
+        else:  # BUY
+            reason = (
+                f"🟢 <b>下跌衰竭做多</b>\n\n"
+                f"• RSI({rsi:.1f})超卖\n"
+                f"• 成交量萎缩{volume_ratio:.1f}x\n"
+                f"• K线下影线长/实体缩小\n"
+                f"• MACD金叉确认\n"
+                f"• 止损设在结构低点${stop_loss:.4f}"
+            )
+        
         position_size = self._calculate_position_size(score, data, price)
 
-        reason = (
-            f"🔴 <b>趋势衰竭做空</b>\n\n"
-            f"• RSI({rsi:.1f})超买\n"
-            f"• 成交量萎缩{volume_ratio:.1f}x\n"
-            f"• 上一根K线实体缩小或上影线较长\n"
-            f"• MACD死叉确认\n"
-            f"• 止损设在结构高点${stop_loss:.4f} (+0.15% buffer)"
-        )
-        
         return {
             'symbol': symbol,
             'pattern': 'TREND_EXHAUSTION',
-            'direction': 'SELL',
+            'direction': direction,
             'rsi': round(float(rsi), 1),
             'volume_ratio': round(volume_ratio, 2),
             'score': int(score),
@@ -1469,9 +1450,6 @@ class SignalChecker:
         entry_main, stop_loss, take_profit1, take_profit2 = self._calculate_stop_loss(
             data, price, direction, trend_direction
         )
-        # 应用额外评分
-        score = self._apply_additional_scoring(score, rsi, volume_ratio, stop_loss, price)
-
         risk = (entry_main - stop_loss) if direction == 'BUY' else (stop_loss - entry_main)
         reward = (take_profit2 - entry_main) if direction == 'BUY' else (entry_main - take_profit2)
         risk_reward = round(reward / risk, 2) if risk > 0 else 0
@@ -1630,7 +1608,7 @@ class SignalChecker:
                                             ))
                                             signal_counts['CALLBACK_CONFIRM_K'] += 1
 
-                # ----- TREND_EXHAUSTION 信号 -----
+                # ----- TREND_EXHAUSTION 做空信号（上涨衰竭） -----
                 if current_rsi > self.params['trend_exhaustion_rsi_min'] and volume_ratio < 1.0:
                     if self._is_signal_allowed('TREND_EXHAUSTION', trend_mode):
                         trend_dir_1h = self._get_trend_direction(data_1h)
@@ -1640,6 +1618,7 @@ class SignalChecker:
                         rsi_prev = rsi_15m.iloc[-2] if len(rsi_15m) >= 2 else current_rsi
                         rsi_boost = 8 if current_rsi < rsi_prev else 0
 
+                        # K线形态：实体缩小或上影线长
                         if len(data_15m) >= 2:
                             curr = data_15m.iloc[-1]
                             prev = data_15m.iloc[-2]
@@ -1661,7 +1640,7 @@ class SignalChecker:
                                                           UltimateConfig.TREND_EXHAUSTION['macd_lookback']):
                                 continue
 
-                        raw_score = self._calculate_trend_exhaustion_score(current_rsi, volume_ratio)
+                        raw_score = self._calculate_trend_exhaustion_score('SELL', current_rsi, volume_ratio)
                         
                         if volume_ratio < UltimateConfig.VOLUME_CONFIG['ultra_low']:
                             raw_score -= UltimateConfig.VOLUME_CONFIG['low_penalty']
@@ -1674,7 +1653,56 @@ class SignalChecker:
                         if raw_score >= dynamic_th:
                             signals.append(self._create_trend_exhaustion_signal(
                                 symbol, data_15m, current_price, current_rsi, volume_ratio, ma20, raw_score,
-                                current_trend_dir, trend_mode
+                                'SELL', current_trend_dir, trend_mode
+                            ))
+                            signal_counts['TREND_EXHAUSTION'] += 1
+
+                # ----- TREND_EXHAUSTION 做多信号（下跌衰竭） -----
+                if current_rsi < self.params.get('trend_exhaustion_rsi_max_for_buy', 35) and volume_ratio < 1.0:
+                    if self._is_signal_allowed('TREND_EXHAUSTION', trend_mode):
+                        trend_dir_1h = self._get_trend_direction(data_1h)
+                        if trend_dir_1h != -1:  # 要求1小时趋势向下
+                            continue
+
+                        rsi_prev = rsi_15m.iloc[-2] if len(rsi_15m) >= 2 else current_rsi
+                        rsi_boost = 8 if current_rsi > rsi_prev else 0  # RSI回升加分
+
+                        # K线形态：实体缩小或下影线长
+                        if len(data_15m) >= 2:
+                            curr = data_15m.iloc[-1]
+                            prev = data_15m.iloc[-2]
+                            curr_body = abs(curr['close'] - curr['open'])
+                            prev_body = abs(prev['close'] - prev['open'])
+                            curr_lower_shadow = min(curr['close'], curr['open']) - curr['low']
+                            
+                            condition1 = curr_body < prev_body
+                            condition2 = curr_lower_shadow > curr_body * 1.5
+                            
+                            if not (condition1 or condition2):
+                                continue
+                        else:
+                            continue
+
+                        if UltimateConfig.TREND_EXHAUSTION['require_macd_cross']:
+                            macd_df = AdvancedIndicators.calculate_macd(data_15m)
+                            if not self._detect_macd_cross(macd_df, 'BUY',
+                                                          UltimateConfig.TREND_EXHAUSTION['macd_lookback']):
+                                continue
+
+                        raw_score = self._calculate_trend_exhaustion_score('BUY', current_rsi, volume_ratio)
+                        
+                        if volume_ratio < UltimateConfig.VOLUME_CONFIG['ultra_low']:
+                            raw_score -= UltimateConfig.VOLUME_CONFIG['low_penalty']
+                            
+                        raw_score = int(raw_score) + rsi_boost
+                        raw_score = max(0, raw_score)
+                        raw_score = self._apply_success_rate_weight(symbol, 'TREND_EXHAUSTION', raw_score)
+                        
+                        dynamic_th = self._get_dynamic_threshold('TREND_EXHAUSTION', data_15m, current_price)
+                        if raw_score >= dynamic_th:
+                            signals.append(self._create_trend_exhaustion_signal(
+                                symbol, data_15m, current_price, current_rsi, volume_ratio, ma20, raw_score,
+                                'BUY', current_trend_dir, trend_mode
                             ))
                             signal_counts['TREND_EXHAUSTION'] += 1
 
@@ -1683,13 +1711,10 @@ class SignalChecker:
                 if engulf_dir and self._is_signal_allowed('CONFIRMATION_K', trend_mode):
                     rsi_dict = {'15m': rsi_15m, '1H': rsi_1h, '4H': rsi_4h}
                     div_type, div_strength = self._detect_divergence_multi_tf(data_dict, rsi_dict)
-
-                    # 计算趋势匹配度
-                    trend_score = self._get_trend_score(data_15m, engulf_dir)
                     
                     raw_score = self._calculate_confirmation_k_score(
                         engulf_dir, current_rsi, volume_ratio, engulf_strength,
-                        div_type, div_strength, trend_score
+                        div_type, div_strength
                     )
                     
                     raw_score = self._apply_penalties(raw_score, current_rsi, volume_ratio, data_15m)
@@ -1707,6 +1732,17 @@ class SignalChecker:
                 if signals:
                     best_signal = max(signals, key=lambda x: x.get('score', 0))
                     
+                    # ============ 量能硬性过滤 ============
+                    vol_ratio = best_signal.get('volume_ratio', 1.0)
+                    if vol_ratio < UltimateConfig.VOLUME_FILTER['direct_discard']:
+                        if DEBUG:
+                            print(f"   ⚠️ {symbol}: 成交量过低 ({vol_ratio:.2f})，丢弃信号")
+                        continue
+                    elif vol_ratio < UltimateConfig.VOLUME_FILTER['heavy_penalty']:
+                        best_signal['score'] -= UltimateConfig.VOLUME_FILTER['heavy_penalty_points']
+                        if best_signal['score'] < 0:
+                            best_signal['score'] = 0
+                    
                     if not self._check_group_limit(symbol, all_signals):
                         if DEBUG:
                             print(f"⚠️ {symbol}: 板块信号数量超限，跳过")
@@ -1715,6 +1751,16 @@ class SignalChecker:
                     time_decay = self._calculate_time_decay(symbol, best_signal['direction'])
                     best_signal['score'] = int(best_signal['score'] * time_decay)
                     best_signal['position_size'] *= time_decay
+                    
+                    # ============ 止损最小距离检查 ============
+                    entry = best_signal['entry_points']['main_entry']
+                    stop = best_signal['entry_points']['stop_loss']
+                    price = best_signal['current_price']
+                    min_dist = price * UltimateConfig.MIN_STOP_DISTANCE_PERCENT
+                    if abs(entry - stop) < min_dist:
+                        if DEBUG:
+                            print(f"   ⚠️ {symbol}: 止损距离过小 ({abs(entry-stop):.6f} < {min_dist:.6f})，丢弃信号")
+                        continue
                     
                     all_signals.append(best_signal)
                     
@@ -1987,11 +2033,11 @@ class UltimateTradingSystem:
 # ============ 主程序入口 ============
 def main():
     print("=" * 70)
-    print("🤖 终极智能交易系统 v37.1 - 评分优化版")
+    print("🤖 终极智能交易系统 v37.0 - 全面优化版")
     print("=" * 70)
     print(f"📅 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"📊 监控币种: {len(MONITOR_COINS)}个")
-    print(f"🎯 信号模式: 动态分层 + 结构确认 + 多周期背离 + 板块风控")
+    print(f"🎯 信号模式: 动态分层 + 结构确认 + 多周期背离 + 板块风控 + 双向衰竭")
     print("=" * 70)
 
     try:
