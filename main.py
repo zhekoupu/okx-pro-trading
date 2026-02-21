@@ -54,14 +54,17 @@ CANDLE_LIMIT = 200  # 增加数据量
 
 # 监控币种分组（用于相关性控制）
 COIN_GROUPS = {
-    'MAJOR': ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'ADA'],
-    'LAYER1': ['AVAX', 'DOT', 'NEAR', 'APT', 'SUI', 'SEI', 'INJ', 'FET', 'THETA'],
-    'LAYER2': ['ARB', 'OP', 'LDO', 'MATIC', 'IMX'],
-    'DEFI': ['UNI', 'LINK', 'AAVE', 'COMP', 'YFI', 'SNX', 'CRV', 'MKR'],
-    'GAMING': ['SAND', 'MANA', 'ENJ', 'GALA', 'AXS', 'APE'],
-    'MEME': ['DOGE', 'SHIB', 'PEPE'],
-    'PRIVACY': ['XMR', 'ZEC', 'DASH'],
-    'EXCHANGE': ['CRO', 'OKB', 'BNB'],
+     'MAJOR': ['BTC','ETH','SOL','ADA','XRP','BCH'],
+    'LAYER1': ['AVAX','DOT','NEAR','APT','SUI','SEI'],
+    'LAYER2': ['ARB','OP','LDO','IMX','STRK','MANTA'],
+    'DEFI': ['UNI','LINK','AAVE','COMP','CRV','MKR','DYDX','SUSHI','GMX','RDNT'],
+    'GAMING': ['SAND','MANA','ENJ','GALA','AXS','RON','GMT'],
+    'MEME': ['DOGE','SHIB','PEPE','FLOKI','BONK'],
+    'PRIVACY': ['LIT','ZEC','DASH'],
+    'EXCHANGE': ['CRO','TRX','BNB','HYPE','KCS'],
+    'AI': ['RNDR','OCEAN','GRT','NMR'],
+    'RWA': ['ONDO','CFG','POLYX'],
+    'STORAGE': ['FIL','AR','STX'],
     'OTHERS': []
 }
 
