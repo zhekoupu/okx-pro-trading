@@ -1857,6 +1857,8 @@ class SignalChecker:
         if UltimateConfig.OBSERVATION_ENABLED:
             for sig in all_signals:
                 if UltimateConfig.OBSERVATION_THRESHOLD <= sig['score'] < UltimateConfig.HIGH_CONFIDENCE_THRESHOLD:
+                    # 添加打印，显示观察池信号
+        print(f"🔍 观察池信号: {sig['symbol']} {sig['direction']} {sig['pattern']} 评分:{sig['score']}")
                     new_observation_pool.append({
                         'time': current_time,
                         'symbol': sig['symbol'],
