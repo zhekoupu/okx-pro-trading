@@ -867,7 +867,7 @@ class SignalChecker:
         factor = max(UltimateConfig.MIN_VOLATILITY_FACTOR, 
                     min(volatility, UltimateConfig.MAX_VOLATILITY_FACTOR))
         base = self.base_thresholds.get(pattern, 40)
-        adjusted = int(base * (1 - factor))
+        adjusted = int(base * (1 + factor))
         return max(int(base * 0.8), adjusted)
 
     def _apply_success_rate_weight(self, symbol: str, pattern: str, raw_score: int) -> int:
