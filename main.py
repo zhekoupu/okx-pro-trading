@@ -54,20 +54,20 @@ BINANCE_API_BASE_URL = "https://api.binance.com"
 
 OKX_CANDLE_INTERVAL = ["15m", "1H", "4H"]  # 增加4小时周期
 BINANCE_CANDLE_INTERVAL = ["15m", "1h", "4h"]
-CANDLE_LIMIT = 200  # 增加数据量
+CANDLE_LIMIT = 120  # 增加数据量
 
 # 监控币种分组（用于相关性控制）
 COIN_GROUPS = {
      'MAJOR': ['BTC','ETH','SOL','ADA','XRP','BCH'],
     'LAYER1': ['AVAX','DOT','NEAR','APT','SUI','SEI'],
     'LAYER2': ['ARB','OP','LDO','IMX','STRK','MANTA'],
-    'DEFI': ['UNI','LINK','AAVE','COMP','CRV','MKR','DYDX','SUSHI','GMX','RDNT'],
-    'GAMING': ['SAND','MANA','ENJ','GALA','AXS','RON','GMT'],
+    'DEFI': ['UNI','LINK','AAVE','COMP','CRV','TRB','DYDX','SUSHI','GMX','RDNT'],
+    'GAMING': ['SAND','MANA','ENJ','GALA','AXS','PIPPIN','XAU'],
     'MEME': ['DOGE','SHIB','PEPE','FLOKI','BONK'],
     'PRIVACY': ['LIT','ZEC','DASH'],
-    'EXCHANGE': ['CRO','TRX','BNB','HYPE','KCS'],
-    'AI': ['RNDR','OCEAN','GRT','NMR'],
-    'RWA': ['ONDO','CFG','POLYX'],
+    'EXCHANGE': ['CRO','TRX','BNB','HYPE','XLM'],
+    'AI': ['ASTER','JUP','GRT','NMR'],
+    'RWA': ['ONDO','PUMP','WLD'],
     'STORAGE': ['FIL','AR','STX'],
     'OTHERS': []
 }
@@ -171,7 +171,7 @@ class UltimateConfig:
     MAX_VOLATILITY_FACTOR = 0.02
     
     # ===== 发送阈值 =====
-    HIGH_CONFIDENCE_THRESHOLD = 80
+    HIGH_CONFIDENCE_THRESHOLD = 75
     OBSERVATION_THRESHOLD = 50
     OBSERVATION_ENABLED = True
     OBSERVATION_POOL_FILE = 'observation_pool.json'
@@ -191,13 +191,13 @@ class UltimateConfig:
     
     # ===== 相关性控制 =====
     CORRELATION_CONTROL_ENABLED = True
-    MAX_SIGNALS_PER_GROUP = 2            # 每个板块最多同时发几个信号
+    MAX_SIGNALS_PER_GROUP = 3            # 每个板块最多同时发几个信号
     
     # ===== 多周期配置 =====
     MULTI_TIMEFRAME_WEIGHTS = {
-        '15m': 0.4,
+        '15m': 0.3,
         '1H': 0.35,
-        '4H': 0.25
+        '4H': 0.4
     }
     
     # ===== 背离检测 =====
@@ -309,7 +309,7 @@ class UltimateConfig:
     }
     
     # ===== 多周期趋势 =====
-    ENFORCE_1H_STRUCTURE = False
+    ENFORCE_1H_STRUCTURE = True
     ONE_HOUR_CONFLICT_PENALTY = 0.75
     
     # ===== CONFIRMATION_K权重 =====
