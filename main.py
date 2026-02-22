@@ -54,7 +54,7 @@ BINANCE_API_BASE_URL = "https://api.binance.com"
 
 OKX_CANDLE_INTERVAL = ["15m", "1H", "4H"]  # 增加4小时周期
 BINANCE_CANDLE_INTERVAL = ["15m", "1h", "4h"]
-CANDLE_LIMIT = 120  # 增加数据量
+CANDLE_LIMIT = 160  # 增加数据量
 
 # 监控币种分组（用于相关性控制）
 COIN_GROUPS = {
@@ -171,7 +171,7 @@ class UltimateConfig:
     MAX_VOLATILITY_FACTOR = 0.02
     
     # ===== 发送阈值 =====
-    HIGH_CONFIDENCE_THRESHOLD = 75
+    HIGH_CONFIDENCE_THRESHOLD = 70
     OBSERVATION_THRESHOLD = 50
     OBSERVATION_ENABLED = True
     OBSERVATION_POOL_FILE = 'observation_pool.json'
